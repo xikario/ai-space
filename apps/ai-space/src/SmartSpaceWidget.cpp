@@ -217,6 +217,7 @@ constexpr int kDefaultHeight = 520;
 // explicit pages so the complete index remains searchable without creating
 // thousands of QWidget objects at once.
 constexpr int kResultsPageSize = 100;
+constexpr int kInitialResultsPageSize = 32;
 constexpr int kMaxWatchedDirectories = 512;
 constexpr int kKnowledgeErrorLimit = 64 * 1024;
 constexpr int kMinResultDensity = -5;
@@ -2874,6 +2875,10 @@ QString SmartSpaceWidget::skillDirectoryPath() const
 void SmartSpaceWidget::startKnowledgeTask(
         const QString &task, const QStringList &arguments)
 {
+    if(property("knowledgeMigrationPending").toBool()) {
+        m_statusLabel->setText(QStringLiteral("旧知识库正在后台导入，当前仍可检索文件快照"));
+        return;
+    }
     if (m_knowledgeProcess) {
         m_statusLabel->setText(QStringLiteral(
             "知识库任务正在运行 · 可从管理菜单暂停"));
@@ -3840,6 +3845,8 @@ bool SmartSpaceWidget::applyIndexSnapshot(IndexSnapshot snapshot)
         m_statusLabel->setText(snapshot.statusPrefix + QString::number(m_entries.size()) + snapshot.statusSuffix);
     if (qEnvironmentVariableIsSet("UKUI_FENCES_STARTUP_TRACE"))
         qInfo() << "[AiSpaceStartup] index-applied" << elapsed.elapsed() << "ms";
+    setProperty("indexApplyMs",elapsed.elapsed());
+    emit indexLoaded();
 #if defined(__GLIBC__)
     QTimer::singleShot(0, [] { malloc_trim(0); });
 #endif
@@ -3884,6 +3891,10 @@ void SmartSpaceWidget::rebuildWatches()
     if (!oldDirs.isEmpty())
         m_watcher->removePaths(oldDirs);
 
+    // Manual and periodic updates do not consume file-change events. Avoid
+    // thousands of directory stats/watches on every startup in those modes.
+    if(m_indexMode!=1)return;
+
     QStringList paths;
     QSet<QString> seenPaths;
     for (const QString &root : m_roots) {
@@ -3906,6 +3917,18 @@ void SmartSpaceWidget::rebuildWatches()
     m_watcher->addPaths(paths);
 }
 
+void SmartSpaceWidget::setKnowledgeMigrationPending(bool pending)
+{
+    setProperty("knowledgeMigrationPending",pending);
+    auto *label=findChild<QLabel *>("knowledgeMigrationStatus");
+    if(!label && pending) {
+        label=new QLabel(QStringLiteral("旧知识库正在后台导入 · 文件检索可正常使用"),m_contentContainer);
+        label->setObjectName("knowledgeMigrationStatus");label->setWordWrap(true);
+        m_contentContainer->layout()->addWidget(label);
+    }
+    if(label)label->setVisible(pending);
+}
+
 void SmartSpaceWidget::scheduleReindex()
 {
     if (m_indexMode != 1 || !m_automaticIndexingReady)
@@ -3926,7 +3949,7 @@ void SmartSpaceWidget::updateActionState()
     m_pinButton->setText(m_alwaysOnTop
         ? QStringLiteral("已置顶") : QStringLiteral("置顶"));
     m_pinButton->setToolTip(m_alwaysOnTop
-        ? QStringLiteral("取消置顶，返回桌面小组件层")
+        ? QStringLiteral("取消置顶，作为普通应用窗口显示")
         : QStringLiteral("让AI空间悬浮在所有应用上方"));
 }
 
@@ -4249,8 +4272,7 @@ QVector<int> SmartSpaceWidget::matchingFileIndexes() const
     }
     // An empty search has no meaningful relevance order.  Keeping snapshot
     // order avoids scoring and sorting tens of thousands of files at startup.
-    if (m_resultSortMode == 0 && m_executedQuery.trimmed().isEmpty() &&
-true)
+    if (m_resultSortMode == 0 && m_executedQuery.trimmed().isEmpty())
         return result;
 
     const QString foldedQuery = m_executedQuery.trimmed().toCaseFolded();
@@ -4666,7 +4688,7 @@ void SmartSpaceWidget::updateResults(bool resetFolders)
              QString::number(m_entries.size()));
     if (pageKey != m_resultPageKey) {
         m_resultPageKey = pageKey;
-        m_visibleResultLimit = kResultsPageSize;
+        m_visibleResultLimit = kInitialResultsPageSize;
     }
 
     m_fileList->setSpacing(m_resultDensity <= -3 ? 0
@@ -4696,7 +4718,7 @@ void SmartSpaceWidget::updateResults(bool resetFolders)
             "加载更多 %1 个 · 剩余 %2")
             .arg(nextBatch).arg(remaining));
         loadMore->setToolTip(QStringLiteral(
-            "每次只创建 100 个文件卡片，避免大量结果一次占用过多资源"));
+            "首次显示 32 项，之后每次增加 100 项，避免大量结果一次创建控件"));
         m_fileList->setItemWidget(moreItem, loadMore);
         connect(loadMore, &QToolButton::clicked, this, [this, visible] {
             m_visibleResultLimit += kResultsPageSize;
@@ -4824,41 +4846,41 @@ void SmartSpaceWidget::appendRootLevel()
     };
     QVector<FolderResult> folders;
     QHash<QString, int> folderIndexes;
-    // Build navigation groups from the same result set shown on the right.
-    // Do not depend on separate directory records: knowledge-only matches and
-    // snapshots without directory entries must still produce folder groups.
-    for (const SmartSpaceEntry &entry : m_entries) {
-        if (!fileMatchesCurrentResults(entry, false))
-            continue;
-        QStringList candidateRoots;
-        if (!entry.root.isEmpty())
-            candidateRoots << entry.root;
-        for (const QString &configuredRoot : m_roots) {
-            if (!candidateRoots.contains(configuredRoot))
-                candidateRoots << configuredRoot;
-        }
-        for (const QString &root : candidateRoots) {
-            const QString cleanRoot = normalizedPath(root);
-            if (!pathIsInside(entry.path, cleanRoot))
-                continue;
-            const QString relative = QDir(cleanRoot).relativeFilePath(entry.path);
-            const int separator = relative.indexOf(QLatin1Char('/'));
-            if (separator <= 0)
+    // Files in the same directory share a navigation group. Resolve its
+    // root/relative path once per parent, not once per document (100k+ items).
+    QHash<QString,QHash<QString,QString>> groupByParent;
+    QStringList configuredRoots;
+    for(const auto &root:m_roots)configuredRoots<<normalizedPath(root);
+    for(const auto &entry:m_entries) {
+        if(!fileMatchesCurrentResults(entry,false))continue;
+        const QString parent=entry.path.left(entry.path.lastIndexOf(QLatin1Char('/')));
+        auto &parents=groupByParent[entry.root];
+        auto cached=parents.constFind(parent);
+        QString key;
+        if(cached!=parents.constEnd())key=cached.value();
+        else {
+            QStringList roots;
+            if(!entry.root.isEmpty())roots<<normalizedPath(entry.root);
+            for(const auto &root:configuredRoots)if(!roots.contains(root))roots<<root;
+            for(const auto &root:roots) {
+                const QString prefix=root==QStringLiteral("/")?root:root+QLatin1Char('/');
+                if(!entry.path.startsWith(prefix))continue;
+                const int separator=entry.path.indexOf(QLatin1Char('/'),prefix.size());
+                if(separator<0)break;
+                const QString candidate=entry.path.left(separator);
+                if(!folderHidden(candidate))key=candidate;
                 break;
-            const QString key = normalizedPath(
-                QDir(cleanRoot).filePath(relative.left(separator)));
-            if (folderHidden(key))
-                break;
-            const auto found = folderIndexes.constFind(key);
-            if (found == folderIndexes.constEnd()) {
-                folderIndexes.insert(key, folders.size());
-                folders.append({key, QFileInfo(key).fileName(), 1});
-            } else {
-                ++folders[found.value()].count;
             }
-            break;
+            parents.insert(parent,key);
         }
+        if(key.isEmpty())continue;
+        const auto found=folderIndexes.constFind(key);
+        if(found==folderIndexes.constEnd()) {
+            folderIndexes.insert(key,folders.size());
+            folders.append({key,QFileInfo(key).fileName(),1});
+        } else ++folders[found.value()].count;
     }
+    setProperty("navigationGroups",folders.size());
     std::sort(folders.begin(), folders.end(), [](const FolderResult &a,
                                                   const FolderResult &b) {
         return QString::localeAwareCompare(a.name, b.name) < 0;

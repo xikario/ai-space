@@ -40,24 +40,30 @@ AiSpaceController::AiSpaceController(QObject *parent):QObject(parent) {}
 AiSpaceController::~AiSpaceController() { delete m_widget.data();delete m_bootstrap.data(); }
 void AiSpaceController::initialize(bool visible,bool settings)
 {
+    m_startup.start();
     m_requestedVisible=visible;
-    if(visible && !qEnvironmentVariableIsSet("AI_SPACE_TEST_NO_BOOTSTRAP")) {
+    if(visible && !QSettings().value("migration/legacyV1",false).toBool()
+        && !QSettings().value("migration/legacyPreferencesV1",false).toBool()
+        && !qEnvironmentVariableIsSet("AI_SPACE_TEST_NO_BOOTSTRAP")) {
         auto *dialog=new LiquidDialog::Dialog;
         dialog->setWindowTitle(QStringLiteral("AI空间"));dialog->setWindowIcon(qApp->windowIcon());
         auto *layout=new QVBoxLayout(dialog);
-        layout->addWidget(new QLabel(QStringLiteral("正在准备液态界面与旧数据副本…"),dialog));
+        layout->addWidget(new QLabel(QStringLiteral("正在导入界面偏好与文件快照…"),dialog));
         dialog->resize(460,160);dialog->show();m_bootstrap=dialog;
         connect(dialog,&QDialog::rejected,this,&AiSpaceController::quit);
     }
     if(settings)m_pending.append([](SmartSpaceWidget *w){QTimer::singleShot(0,w,&SmartSpaceWidget::showSettings);});
     BackgroundTask::run(this,[]{
-        const auto migration=migrateLegacyData();
+        const auto migration=migrateLegacyData(false);
         WallpaperBackdrop wallpaper;wallpaper.reload();
         return qMakePair(migration,wallpaper);
     },[this](const QPair<MigrationResult,WallpaperBackdrop> &result){
         WallpaperBackdrop::shared()=result.second;
         auto *widget=new SmartSpaceWidget;
         m_widget=widget;
+        m_migrationPending=result.first.knowledgePending;
+        widget->setKnowledgeMigrationPending(m_migrationPending);
+        connect(widget,&SmartSpaceWidget::indexLoaded,this,[this]{m_indexReadyMs=m_startup.elapsed();notify();});
         widget->setWindowTitle(QStringLiteral("AI空间"));
         widget->setWindowIcon(qApp->windowIcon());
         connect(widget,&SmartSpaceWidget::closeRequested,this,&AiSpaceController::quit);
@@ -78,6 +84,7 @@ void AiSpaceController::initialize(bool visible,bool settings)
         applyWindowMode();
         if(m_bootstrap){m_bootstrap->hide();m_bootstrap->deleteLater();}
         if(m_requestedVisible)showWindow();else widget->hide();
+        m_uiReadyMs=m_startup.elapsed();
         for(auto &action:m_pending)action(widget);
         m_pending.clear();
         m_tray=new QSystemTrayIcon(qApp->windowIcon(),this);
@@ -94,6 +101,17 @@ void AiSpaceController::initialize(bool visible,bool settings)
         connect(debounce,&QTimer::timeout,this,&AiSpaceController::refreshWallpaper);
         if(!result.first.ok)QTimer::singleShot(0,widget,[widget,error=result.first.error]{LiquidDialog::warning(widget,QStringLiteral("导入旧数据"),error);});
         notify();
+        if(result.first.ok && m_migrationPending) {
+            BackgroundTask::run(this,[]{return migrateLegacyData();},[this](const MigrationResult &migration){
+                m_migrationPending=false;
+                if(m_widget)m_widget->setKnowledgeMigrationPending(false);
+                notify();
+                if(!migration.ok && m_widget) {
+                    const auto widget=m_widget;
+                    QTimer::singleShot(0,widget,[widget,error=migration.error]{if(widget)LiquidDialog::warning(widget,QStringLiteral("导入旧知识库"),error);});
+                }
+            });
+        }
     });
 }
 void AiSpaceController::perform(std::function<void(SmartSpaceWidget*)> action) { if(m_widget)action(m_widget);else if(m_pending.size()<64)m_pending.append(std::move(action)); }
@@ -104,12 +122,16 @@ void AiSpaceController::applyWindowMode() {
 }
 void AiSpaceController::notify(){emit stateChanged(status());}
 QString AiSpaceController::status() const {
-    QJsonObject o{{"application","ai-space"},{"version","0.1.0"},{"ready",bool(m_widget)},{"pid",QCoreApplication::applicationPid()}};
+    QJsonObject o{{"application","ai-space"},{"version","0.1.1"},{"ready",bool(m_widget)},{"pid",QCoreApplication::applicationPid()}};
+    o.insert("migrationPending",m_migrationPending);o.insert("uiReadyMs",m_uiReadyMs);o.insert("indexReadyMs",m_indexReadyMs);
     if(m_widget){o.insert("autoStart",m_widget->autoStart());o.insert("visible",m_widget->isVisible());o.insert("edgeHidden",m_widget->edgeHidden());o.insert("indexBusy",m_widget->indexBusy());o.insert("alwaysOnTop",m_widget->alwaysOnTop());o.insert("glassOptics",m_widget->glassOpticsEnabled());o.insert("x",m_widget->x());o.insert("y",m_widget->y());o.insert("width",m_widget->width());o.insert("height",m_widget->height());
         o.insert("indexedEntries",m_widget->indexedEntryCount());o.insert("results",m_widget->resultCount());
+        o.insert("navigationGroups",m_widget->property("navigationGroups").toInt());
         o.insert("windowId",QString::number(m_widget->internalWinId()));
         o.insert("materialBuilds",m_widget->property("smartGlassMaterialBuilds").toInt());
         o.insert("glassBackend",m_widget->property("smartGlassMaterialBackend").toString());
+        o.insert("indexLoading",m_widget->property("indexLoading").toBool());
+        o.insert("indexApplyMs",m_widget->property("indexApplyMs").toInt());
         o.insert("maximizable",bool(m_widget->windowFlags() & Qt::WindowMaximizeButtonHint));
         o.insert("active",m_widget->edgeTransitionActive());
     }

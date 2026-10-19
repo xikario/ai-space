@@ -81,6 +81,7 @@ public:
     bool alwaysOnTop() const { return m_alwaysOnTop; }
     void setResultDensity(int density);
     void showSettings();
+    void setKnowledgeMigrationPending(bool pending);
     void startFastFullIndex();
     bool indexBusy() const { return m_indexBusy; }
     void hideFolder(const QString &path);
@@ -106,6 +107,7 @@ public:
 
 
 signals:
+    void indexLoaded();
     void closeRequested();
     void autoStartChanged(bool enabled);
     void themeChanged(const QColor &fenceColor, const QColor &titleColor);
@@ -377,7 +379,7 @@ private:
     bool m_previewVisible = false;
     int m_resultDensity = 0;
     int m_resultSortMode = 0;
-    int m_visibleResultLimit = 100;
+    int m_visibleResultLimit = 32;
     QString m_resultPageKey;
     QToolButton *m_sortButton = nullptr;
     QToolButton *m_densityDownButton = nullptr;

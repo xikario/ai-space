@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AiSpace VERSION 0.1.0 LANGUAGES CXX)
+project(AiSpace VERSION 0.1.1 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CTest)
 set(CMAKE_CXX_STANDARD 17)
@@ -67,5 +67,12 @@ if(BUILD_TESTING)
             ${DBUS_RUN_SESSION} -- ${Python3_EXECUTABLE} ${APP}/tests/installed_package_test.py ${CMAKE_BINARY_DIR})
         set_tests_properties(ai-space-installed PROPERTIES TIMEOUT 90
             ENVIRONMENT "QT_SCALE_FACTOR=1;QT_SCREEN_SCALE_FACTORS=1")
+        foreach(MIGRATION_MODE locked cancel)
+            add_test(NAME ai-space-migration-${MIGRATION_MODE} COMMAND ${XVFB_RUN} -a -s "-screen 0 2880x1800x24"
+                ${DBUS_RUN_SESSION} -- ${Python3_EXECUTABLE} ${APP}/tests/app_integration_test.py
+                $<TARGET_FILE:ai-space> --${MIGRATION_MODE}-migration)
+            set_tests_properties(ai-space-migration-${MIGRATION_MODE} PROPERTIES TIMEOUT 65
+                ENVIRONMENT "QT_SCALE_FACTOR=1;QT_SCREEN_SCALE_FACTORS=1")
+        endforeach()
     endif()
 endif()

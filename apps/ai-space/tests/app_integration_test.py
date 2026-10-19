@@ -13,6 +13,8 @@ import struct
 import zlib
 
 binary = Path(sys.argv[1]).resolve()
+locked_migration = '--locked-migration' in sys.argv or '--cancel-migration' in sys.argv
+cancel_migration = '--cancel-migration' in sys.argv
 def checked(value, message):
     if not value:
         raise AssertionError(message)
@@ -44,7 +46,8 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
     (data/'ukui-fences/knowledge').mkdir(parents=True)
     items=[]
     for name,content in [('银行方案.txt','宁波银行 部署要求'),('银行进展.txt','宁波银行 本周进度'),('其他项目.txt','其他项目材料')]:
-        path=documents/name;path.write_text(content)
+        folder=documents/('group-b' if name=='其他项目.txt' else 'group-a');folder.mkdir(exist_ok=True)
+        path=folder/name;path.write_text(content)
         items.append(dict(path=str(path),root=str(documents),name=name,category='documents',content=content,isDir=False))
     legacy=config/'kylin/ukui-fences.ini'
     legacy.write_text('[smartSpace]\nroots='+str(documents)+'\nthemeMode=3\nglassOptics=true\ndefaultHidden=false\nautoStart=true\nposition=@Point(100 100)\nsize=@Size(920 520)\n')
@@ -52,8 +55,9 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
     inherited=config/'kyfences/provider-details.json';inherited.write_text('{"type":"http","url":"https://example.invalid/disabled"}')
     providers=config/'kyfences/smart-space-providers.json';providers.write_text('{"providers":[{"enabled":false,"inheritFrom":"provider-details.json"}]}')
     old_db=data/'ukui-fences/knowledge/smart-space-knowledge.sqlite'
-    connection=sqlite3.connect(old_db);connection.execute('PRAGMA journal_mode=WAL')
+    connection=sqlite3.connect(old_db);connection.execute('PRAGMA journal_mode='+('DELETE' if locked_migration else 'WAL'))
     connection.execute('CREATE TABLE migration_guard(value TEXT)');connection.execute("INSERT INTO migration_guard VALUES ('committed WAL snapshot')");connection.commit()
+    if locked_migration:connection.execute('BEGIN EXCLUSIVE')
     hashes={p:hashlib.sha256(p.read_bytes()).hexdigest() for p in (legacy,index,providers,inherited)}
     wallpaper=home/'test-wallpaper.png'
     def chunk(kind, payload):
@@ -69,6 +73,21 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
         ready=wait(lambda s:s.get('ready') and s.get('visible') and s.get('indexedEntries')==3 and s.get('materialBuilds',0)>0,
             'independent window restores legacy index without Fences')
         pid=ready['pid'];checked(not ready.get('indexBusy'),'opening does not start a document scan')
+        checked(ready['navigationGroups']==2,'startup groups files by their actual parent paths')
+        if locked_migration:
+            checked(ready['migrationPending'],'usable window is ready while the old DB is locked')
+            call('search','宁波银行')
+            wait(lambda s:s.get('results')==2 and s.get('migrationPending'),'file snapshot search stays responsive during knowledge migration')
+            checked(not (data/'ai-space/knowledge/smart-space-knowledge.sqlite').exists(),'pending migration publishes no partial database')
+            if cancel_migration:
+                call('quit');checked(process.wait(timeout=10)==0,'closing during a blocked import cancels its helper normally')
+                checked(not (data/'ai-space/knowledge/smart-space-knowledge.sqlite').exists(),'cancelled import leaves no incomplete target')
+                connection.rollback()
+                process=subprocess.Popen([str(binary),'--show'],env=env,stdout=log.open('a'),stderr=subprocess.STDOUT)
+                ready=wait(lambda s:s.get('ready') and not s.get('migrationPending') and s.get('indexedEntries')==3,'interrupted migration retries successfully on restart')
+                pid=ready['pid']
+            else:connection.commit()
+        wait(lambda s:s.get('ready') and not s.get('migrationPending'),'background knowledge import finishes')
         checked(ready['glassBackend']=='ai-space-local' and not ready['maximizable'],'standalone glass and no maximize button')
         with sqlite3.connect(data/'ai-space/knowledge/smart-space-knowledge.sqlite') as copy:
             checked(copy.execute('SELECT value FROM migration_guard').fetchone()[0]=='committed WAL snapshot','consistent SQLite WAL backup imported')
@@ -87,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
         checked(state()['pid']==pid,'second launch reuses the existing instance')
         builds=state()['materialBuilds']
         call('search','宁波银行')
-        wait(lambda s:s.get('results')==2,'actual search UI filters imported documents')
+        wait(lambda s:s.get('results')==2 and s.get('navigationGroups')==1,'actual search UI filters imported documents and navigation groups')
         checked(state()['materialBuilds']==builds,'search reuses cached glass')
         call('hideWindow');wait(lambda s:not s.get('visible'),'hide releases foreground window')
         call('showWindow');wait(lambda s:s.get('visible'),'hidden application can be restored')

@@ -2,7 +2,7 @@
 
 独立的 Qt 5 液态文件检索应用，面向银河麒麟 V10 / UKUI X11。由 [UKUI Liquid Desktop](https://github.com/xikario/ukui-liquid-desktop) 的智能空间拆出，保留本地索引、OCR、结构化文档提取、知识库与液态界面；无需启动或安装 Fences。
 
-当前版本 **0.1.0**。这是独立应用的初始版本，不是远程 AI 聊天客户端。默认检索和建库均在本机进行；用户显式配置的 Command / HTTP / D-Bus Provider 可调用外部程序或服务。
+当前版本 **0.1.1**。这是独立应用的初始版本，不是远程 AI 聊天客户端。默认检索和建库均在本机进行；用户显式配置的 Command / HTTP / D-Bus Provider 可调用外部程序或服务。
 
 ## 构建与运行
 
@@ -41,7 +41,7 @@ PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中�
 
 ## 数据与旧版迁移
 
-首次启动会复制旧 Fences 的智能空间偏好、索引快照、Provider 配置及知识库。源文件保留；新程序使用独立副本，后续改动不互相同步。知识库通过 SQLite 只读连接和 backup API 一致性迁移，包含已提交的 WAL 内容。
+首次启动会复制旧 Fences 的智能空间偏好、索引快照、Provider 配置及知识库。源文件保留；新程序使用独立副本，后续改动不互相同步。界面和文件快照先就绪，多 GB 知识库在后台复制，不阻塞启动；完成前可检索文件快照，知识库写入暂不可用。知识库通过 SQLite 只读连接和 backup API 一致性迁移，包含已提交的 WAL 内容。
 
 | 数据 | 默认位置 |
 | --- | --- |

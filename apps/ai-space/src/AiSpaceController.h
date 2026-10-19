@@ -5,6 +5,7 @@
 #include <QVariant>
 #include <QList>
 #include <functional>
+#include <QElapsedTimer>
 class SmartSpaceWidget;
 class QSystemTrayIcon;
 class QFileSystemWatcher;
@@ -50,4 +51,7 @@ private:
     QFileSystemWatcher *m_wallpaperWatcher=nullptr;
     bool m_wallpaperLoading=false,m_wallpaperPending=false;
     bool m_requestedVisible=true;
+    bool m_migrationPending=false;
+    QElapsedTimer m_startup;
+    qint64 m_uiReadyMs=-1,m_indexReadyMs=-1;
 };

@@ -14,7 +14,7 @@ int main(int argc,char **argv)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication app(argc,argv);BackgroundTask::ApplicationScope workers;
     app.setApplicationName("ai-space");app.setApplicationDisplayName(QStringLiteral("AI空间"));
-    app.setOrganizationName("xikario");app.setApplicationVersion("0.1.0");app.setDesktopFileName("ai-space");
+    app.setOrganizationName("xikario");app.setApplicationVersion("0.1.1");app.setDesktopFileName("ai-space");
     app.setWindowIcon(QIcon(":/app/icon.png"));app.setQuitOnLastWindowClosed(false);
     QCommandLineParser parser;parser.setApplicationDescription(QStringLiteral("AI空间 · 本地文件、OCR与知识库检索"));parser.addHelpOption();parser.addVersionOption();
     for(const auto &name:{"show","hide","toggle","settings","quit","status","autostart"})parser.addOption(QCommandLineOption(QStringList{name},name));

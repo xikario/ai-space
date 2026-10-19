@@ -8,3 +8,5 @@ Icon=ai-space
 Terminal=false
 Categories=Utility;Office;
 StartupWMClass=ai-space
+Keywords=ai-space;search;OCR;documents;full-text;
+Keywords[zh_CN]=AI空间;智能空间;文档检索;本地知识库;OCR;
