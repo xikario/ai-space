@@ -1,0 +1,9 @@
+# CMAKE_INSTALL_PREFIX is evaluated here, after cmake --install --prefix.
+execute_process(COMMAND "@Python3_EXECUTABLE@" "@APP@/packaging/install_desktop.py"
+    "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_DATADIR@/applications/ai-space.desktop"
+    "${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_BINDIR@/ai-space"
+    "${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_DATADIR@/icons/hicolor/128x128/apps/ai-space.png"
+    RESULT_VARIABLE desktop_result)
+if(NOT desktop_result EQUAL 0)
+    message(FATAL_ERROR "Could not resolve AI Space desktop entry")
+endif()

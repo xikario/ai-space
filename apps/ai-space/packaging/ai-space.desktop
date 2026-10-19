@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AI空间
+Name[en]=AI Space
+Comment=本地文件索引、OCR与知识库检索
+Exec=ai-space --show
+Icon=ai-space
+Terminal=false
+Categories=Utility;Office;
+StartupWMClass=ai-space

@@ -1,0 +1,7 @@
+build/
+.local-deps/
+__pycache__/
+*.pyc
+*.user
+releases/
+.env
