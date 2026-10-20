@@ -1,15 +1,9 @@
-#include "LiquidDialog.h"
-#include "PointerEffect.h"
 #include <QPaintEvent>
 #include "../../../shared/async-work/BackgroundTask.h"
 #include <QDBusPendingCall>
-#include "LiquidPopup.h"
-#include "SettingsComboPopup.h"
 #include "SmartSpaceWidget.h"
-#include "GlassFinish.h"
-#include "FenceGlassRenderer.h"
+#include "WindowTitleBarWidget.h"
 #include "VideoWallpaperRegion.h"
-#include "WallpaperBackdrop.h"
 
 #include "DesktopItem.h"
 #include <QAction>
@@ -34,7 +28,6 @@
 #include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QFrame>
-#include <QGraphicsOpacityEffect>
 #include <QElapsedTimer>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -85,7 +78,6 @@
 #include <QTextBrowser>
 #include <QUrl>
 #include <QVBoxLayout>
-#include <QVariantAnimation>
 #include <QtEndian>
 #include <QtDBus/QDBusInterface>
 #include <QtDBus/QDBusConnection>
@@ -112,24 +104,28 @@ QMessageBox::StandardButton smartMessage(QWidget *parent, const QString &title,
     const QString &text, QMessageBox::Icon icon, QMessageBox::StandardButtons buttons,
     QMessageBox::StandardButton defaultButton)
 {
-    LiquidDialog::Dialog dialog(parent);
-    dialog.setObjectName("smartSpaceMessage"); dialog.setWindowTitle(title);
-    const QColor inherited = parent->palette().color(QPalette::WindowText);
+    QDialog dialog(parent, Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+    dialog.setObjectName("smartSpaceMessage");
+    dialog.setWindowTitle(title);
+    const QColor inherited = parent ? parent->palette().color(QPalette::WindowText) : QColor("#0f172a");
     const bool dark = inherited.lightness() > 128;
-    const QString bg = dark ? "#182330" : "#f5f7fa";
-    const QString fg = dark ? "#f4f8fc" : "#182330";
-    const QString button = dark ? "#293d50" : "#e2e9f0";
+    const QString bg = dark ? "#131c31" : "#ffffff";
+    const QString fg = dark ? "#f1f5f9" : "#0f172a";
+    const QString border = dark ? "#26354d" : "#cbd5e1";
+    const QString button = dark ? "#1e293b" : "#f1f5f9";
+    const QString accent = dark ? "#3b82f6" : "#2563eb";
     QPalette pal = dialog.palette();
-    pal.setColor(QPalette::Window,QColor(bg));
-    pal.setColor(QPalette::WindowText,QColor(fg));
-    pal.setColor(QPalette::ButtonText,QColor(fg)); dialog.setPalette(pal);
+    pal.setColor(QPalette::Window, QColor(bg));
+    pal.setColor(QPalette::WindowText, QColor(fg));
+    pal.setColor(QPalette::ButtonText, QColor(fg));
+    dialog.setPalette(pal);
     dialog.setStyleSheet(QStringLiteral(
-        "QDialog#smartSpaceMessage { background: transparent; color: %1; }"
-        "QDialog#smartSpaceMessage QLabel { color: %1; background: transparent; font-size: 14px; }"
-        "QDialog#smartSpaceMessage QPushButton { color: %1; background: %2; border: 1px solid #72869a;"
-        "border-radius: 7px; padding: 7px 18px; min-width: 58px; }"
+        "QDialog#smartSpaceMessage { background: %1; color: %2; }"
+        "QDialog#smartSpaceMessage QLabel { color: %2; background: transparent; font-size: 14px; }"
+        "QDialog#smartSpaceMessage QPushButton { color: %2; background: %3; border: 1px solid %4;"
+        "border-radius: 8px; padding: 7px 18px; min-width: 64px; font-weight: 500; }"
         "QDialog#smartSpaceMessage QPushButton:focus, QDialog#smartSpaceMessage QPushButton:hover {"
-        "border: 2px solid #339bdd; padding: 6px 17px; }").arg(fg,button));
+        "border: 1px solid %5; background: %5; color: #ffffff; }").arg(bg, fg, button, border, accent));
     auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(24,22,24,20);
     auto *row = new QHBoxLayout; row->setSpacing(16);
     auto *symbol = new QLabel(&dialog);
@@ -169,50 +165,8 @@ void smartInformation(QWidget *p,const QString &title,const QString &text)
 void smartWarning(QWidget *p,const QString &title,const QString &text)
 { smartMessage(p,title,text,QMessageBox::Warning,QMessageBox::Ok,QMessageBox::Ok); }
 
-// Animate a single captured frame, not the file-card hierarchy or its layout.
-class SmartRevealFrame final : public QWidget
-{
-public:
-    QPixmap frame;
-    QPixmap background;
-    QElapsedTimer paintClock;
-    qint64 previousPaintMs = -1;
-    qint64 maxPaintGapMs = 0;
-    int paintedFrames = 0;
-    qreal progress = 0;
-    QPoint offset;
-    QVariantAnimation *motion = nullptr;
-    explicit SmartRevealFrame(QWidget *parent, Qt::WindowFlags flags)
-        : QWidget(parent, flags)
-    {
-        setObjectName("smartSpaceRevealFrame");
-        setAttribute(Qt::WA_ShowWithoutActivating);
-        setAttribute(Qt::WA_TransparentForMouseEvents);
-        if (isWindow()) setAttribute(Qt::WA_TranslucentBackground);
-    }
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        const qint64 now = paintClock.isValid() ? paintClock.elapsed() : 0;
-        if (previousPaintMs >= 0) maxPaintGapMs = qMax(maxPaintGapMs, now-previousPaintMs);
-        previousPaintMs = now;
-        ++paintedFrames;
-        QPainter p(this);
-        if (!background.isNull()) {
-            p.drawPixmap(0, 0, background);
-        } else if (isWindow()) {
-            p.setCompositionMode(QPainter::CompositionMode_Source);
-            p.fillRect(rect(), Qt::transparent);
-            p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        }
-        p.setOpacity(progress);
-        p.drawPixmap(QPoint(qRound(offset.x() * (1-progress)),
-                            qRound(offset.y() * (1-progress))), frame);
-    }
-};
-
-constexpr int kDefaultWidth = 920;
-constexpr int kDefaultHeight = 520;
+constexpr int kDefaultWidth = 980;
+constexpr int kDefaultHeight = 620;
 // Rich result cards use a few lightweight child widgets each. Build them in
 // explicit pages so the complete index remains searchable without creating
 // thousands of QWidget objects at once.
@@ -413,6 +367,72 @@ QString cssColor(const QColor &color)
         .arg(color.red()).arg(color.green()).arg(color.blue()).arg(color.alpha());
 }
 
+void styleModernCombos(QWidget *root)
+{
+    if (!root)
+        return;
+    const QList<QComboBox *> combos = root->findChildren<QComboBox *>();
+    for (QComboBox *combo : combos) {
+        if (!qobject_cast<QListView *>(combo->view())) {
+            auto *view = new QListView(combo);
+            view->setFrameShape(QFrame::NoFrame);
+            combo->setView(view);
+        }
+    }
+}
+
+void execMenuAt(QMenu &menu, QWidget *anchor)
+{
+    if (!anchor) {
+        menu.exec(QCursor::pos());
+        return;
+    }
+    menu.ensurePolished();
+    menu.adjustSize();
+    QPoint pos = anchor->mapToGlobal(QPoint(0, anchor->height() + 6));
+    if (QScreen *screen = QGuiApplication::screenAt(pos)) {
+        const QRect avail = screen->availableGeometry();
+        if (pos.x() + menu.width() > avail.right())
+            pos.setX(qMax(avail.left() + 4, anchor->mapToGlobal(QPoint(anchor->width(), 0)).x() - menu.width()));
+        if (pos.y() + menu.height() > avail.bottom())
+            pos.setY(qMax(avail.top() + 4, anchor->mapToGlobal(QPoint(0, 0)).y() - menu.height() - 6));
+    }
+    menu.exec(pos);
+}
+
+QPixmap brandBadgePixmap(int size)
+{
+    const qreal dpr = qApp ? qApp->devicePixelRatio() : 1.0;
+    const int px = qMax(16, qRound(size * dpr));
+    QPixmap pixmap(px, px);
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF rect(1.0, 1.0, size - 2.0, size - 2.0);
+    QLinearGradient grad(rect.topLeft(), rect.bottomRight());
+    grad.setColorAt(0.0, QColor(QStringLiteral("#2563eb")));
+    grad.setColorAt(0.55, QColor(QStringLiteral("#4f46e5")));
+    grad.setColorAt(1.0, QColor(QStringLiteral("#6366f1")));
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(grad);
+    painter.drawRoundedRect(rect, size * 0.28, size * 0.28);
+
+    const QPointF c = rect.center();
+    const qreal r = size * 0.30;
+    QPainterPath star;
+    star.moveTo(c.x(), c.y() - r);
+    star.cubicTo(c.x() + r * 0.14, c.y() - r * 0.14, c.x() + r * 0.14, c.y() - r * 0.14, c.x() + r, c.y());
+    star.cubicTo(c.x() + r * 0.14, c.y() + r * 0.14, c.x() + r * 0.14, c.y() + r * 0.14, c.x(), c.y() + r);
+    star.cubicTo(c.x() - r * 0.14, c.y() + r * 0.14, c.x() - r * 0.14, c.y() + r * 0.14, c.x() - r, c.y());
+    star.cubicTo(c.x() - r * 0.14, c.y() - r * 0.14, c.x() - r * 0.14, c.y() - r * 0.14, c.x(), c.y() - r);
+    star.closeSubpath();
+    painter.fillPath(star, Qt::white);
+    painter.setBrush(QColor(255, 255, 255, 220));
+    painter.drawEllipse(QPointF(c.x() + r * 0.58, c.y() - r * 0.58), size * 0.055, size * 0.055);
+    return pixmap;
+}
+
 QPixmap modernRailGlyph(const QString &key, const QColor &color)
 {
     QPixmap pixmap(48, 48);
@@ -510,6 +530,47 @@ QPixmap modernRailGlyph(const QString &key, const QColor &color)
                 QPointF(24 + std::cos(radians) * 16,
                         24 + std::sin(radians) * 16));
         }
+    } else if (key == QLatin1String("search")) {
+        painter.drawEllipse(QRectF(10, 10, 21, 21));
+        painter.drawLine(QPointF(27, 27), QPointF(38, 38));
+    } else if (key == QLatin1String("knowledge")) {
+        painter.drawRoundedRect(QRectF(10, 10, 28, 28), 5, 5);
+        painter.drawLine(QPointF(18, 10), QPointF(18, 38));
+        painter.drawLine(QPointF(24, 19), QPointF(32, 19));
+        painter.drawLine(QPointF(24, 26), QPointF(32, 26));
+    } else if (key == QLatin1String("sun")) {
+        painter.drawEllipse(QRectF(16, 16, 16, 16));
+        for (int angle = 0; angle < 360; angle += 45) {
+            const qreal rad = qDegreesToRadians(static_cast<qreal>(angle));
+            painter.drawLine(QPointF(24 + std::cos(rad) * 12, 24 + std::sin(rad) * 12),
+                             QPointF(24 + std::cos(rad) * 17, 24 + std::sin(rad) * 17));
+        }
+    } else if (key == QLatin1String("moon")) {
+        QPainterPath moon;
+        moon.addEllipse(QRectF(11, 11, 26, 26));
+        QPainterPath cut;
+        cut.addEllipse(QRectF(18, 7, 24, 24));
+        painter.fillPath(moon.subtracted(cut), color);
+    } else if (key == QLatin1String("minimize")) {
+        painter.setPen(QPen(color, 3.4, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(QPointF(13, 24), QPointF(35, 24));
+    } else if (key == QLatin1String("maximize")) {
+        painter.setPen(QPen(color, 3.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawRoundedRect(QRectF(13, 13, 22, 22), 4.0, 4.0);
+    } else if (key == QLatin1String("restore")) {
+        painter.setPen(QPen(color, 2.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawRoundedRect(QRectF(12, 17, 18, 18), 3.5, 3.5);
+        QPainterPath back;
+        back.moveTo(18, 17);
+        back.lineTo(18, 13);
+        back.lineTo(35, 13);
+        back.lineTo(35, 30);
+        back.lineTo(30, 30);
+        painter.drawPath(back);
+    } else if (key == QLatin1String("close")) {
+        painter.setPen(QPen(color, 3.4, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(QPointF(14, 14), QPointF(34, 34));
+        painter.drawLine(QPointF(34, 14), QPointF(14, 34));
     }
     return pixmap;
 }
@@ -834,30 +895,13 @@ SmartSpaceWidget::SmartSpaceWidget(bool fenceEmbedded, QWidget *parent)
     m_geometrySaveTimer.setSingleShot(true);
     m_geometrySaveTimer.setInterval(250);
     connect(&m_geometrySaveTimer, &QTimer::timeout, this, [this] {
-        if (m_edgeTransition) return; // completion schedules the deferred save
         saveSettings();
     });
-    m_glassBackdropRefreshTimer.setSingleShot(true);
-    connect(&m_glassBackdropRefreshTimer, &QTimer::timeout,
-            this, &SmartSpaceWidget::refreshGlassBackdrop);
-    m_glassPointerEffect = new PointerEffect(this, [this](const QPoint &pos, bool inside) {
-        const bool active = inside && m_themeMode == 3 && !m_fenceEmbedded && !m_edgeHidden;
-        if (m_glassPointerActive != active || (active && m_glassPointerPosition != pos)) {
-            QRegion damage;
-            if (m_glassPointerActive) damage |= glassPointerDamage(m_glassPointerPosition);
-            if (active) damage |= glassPointerDamage(pos);
-            m_glassPointerActive = active;
-            m_glassPointerPosition = pos;
-            if (!damage.isEmpty()) update(damage);
-        }
-        return false;
-    });
     applyTheme();
-    if (m_themeMode == 3)
-        refreshGlassBackdrop();
     rebuildFileScopePill();
     rebuildCategoryPills();
     updateActionState();
+    updateWindowStateButtons();
     updateRoundedMask();
 
     m_indexer = new QProcess(this);
@@ -931,18 +975,11 @@ SmartSpaceWidget::SmartSpaceWidget(bool fenceEmbedded, QWidget *parent)
         qEnvironmentVariableIntValue("AI_SPACE_TEST_AUTO_INDEX") == 1)
         QTimer::singleShot(250, this, &SmartSpaceWidget::startIndexing);
 
-    // Default hidden: auto-hide to nearest edge after initialization
-    if (m_defaultHidden && !m_edgeHidden && !qEnvironmentVariableIsSet("AI_SPACE_EXPLICIT_SHOW")) {
-        QTimer::singleShot(200, this, [this]() {
-            hideToNearestEdge();
-        });
-    }
+
 }
 
 SmartSpaceWidget::~SmartSpaceWidget()
 {
-    if (m_glassPointerEffect) m_glassPointerEffect->stop();
-    delete m_edgeTransition.data();
     m_geometrySaveTimer.stop();
     saveSettings();
     if (m_indexer && m_indexer->state() != QProcess::NotRunning) {
@@ -970,76 +1007,62 @@ SmartSpaceWidget::~SmartSpaceWidget()
 
 void SmartSpaceWidget::buildUi()
 {
-    auto *shell = new QHBoxLayout(this);
-    shell->setContentsMargins(4, 4, 4, 4);
+    auto *shell = new QVBoxLayout(this);
+    shell->setContentsMargins(1, 1, 1, 1);
     shell->setSpacing(0);
 
-    m_actionRail = new QFrame(this);
-    m_actionRail->setObjectName(QStringLiteral("smartActionRail"));
-    m_actionRail->setFixedWidth(62);
-    auto *railLayout = new QVBoxLayout(m_actionRail);
-    railLayout->setContentsMargins(3, 7, 3, 7);
-    railLayout->setSpacing(4);
-
-    auto createRailButton = [this, railLayout](const QString &iconKey,
-                                                const QString &text,
-                                                const QString &tip) {
+    auto *titleBar = new AiSpace::WindowTitleBarWidget(this);
+    m_actionRail = titleBar;
+    auto makeUtility = [this](const QString &key,const QString &tip) {
         auto *button = new QToolButton(m_actionRail);
-        button->setProperty("railIconKey", iconKey);
-        button->setIcon(modernRailIcon(
-            iconKey, QColor(QStringLiteral("#94a3b8")),
-            QColor(QStringLiteral("#e2e8f0")), Qt::white));
-        button->setIconSize(QSize(19, 19));
-        button->setText(text);
-        button->setToolTip(tip);
-        button->setProperty("railAction", true);
-        button->setAutoRaise(false);
-        button->setCursor(Qt::PointingHandCursor);
-        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-        button->setFixedSize(54, 48);
-        railLayout->addWidget(button, 0, Qt::AlignHCenter);
+        button->setProperty("titleControl",true);
+        button->setProperty("railIconKey",key);
+        button->setToolTip(tip); button->setAccessibleName(tip);
+        button->setFixedSize(28,26); button->setCursor(Qt::PointingHandCursor);
         return button;
     };
-
-    m_pinButton = createRailButton(
-        QStringLiteral("pin"), QStringLiteral("置顶"),
-        QStringLiteral("让AI空间悬浮在所有应用上方"));
-    m_pinButton->setCheckable(true);
-    m_closeButton = createRailButton(
-        QStringLiteral("hide"), QStringLiteral("隐藏"),
-        QStringLiteral("贴边隐藏；星标会留在这个按钮的同一纵向位置"));
-    m_idleIndexButton = createRailButton(
-        QStringLiteral("database"), QStringLiteral("快全量"),
-        QStringLiteral("快速全量：不限文件数，不启动 OCR，待检测/OCR 文件单独标记"));
-    m_refreshButton = createRailButton(
-        QStringLiteral("refresh"), QStringLiteral("增量"),
-        QStringLiteral("快速增量：复用现有索引，仅更新新增或变更文件，不启动 OCR"));
-    m_ocrIndexButton = createRailButton(
-        QStringLiteral("ocr"), QStringLiteral("OCR"),
-        QStringLiteral("先检测 PDF 文本层，再仅识别图片和无文本层 PDF，支持断点"));
-    m_pauseIndexButton = createRailButton(
-        QStringLiteral("pause"), QStringLiteral("暂停"),
-        QStringLiteral("安全中断当前任务；快速全量与 OCR 保留独立断点"));
-    m_pauseIndexButton->setEnabled(false);
-    railLayout->addStretch(1);
-    m_moreButton = createRailButton(
-        QStringLiteral("settings"), QStringLiteral("设置"),
-        QStringLiteral("AI空间设置"));
-    m_moreButton->setObjectName(QStringLiteral("smartMoreButton"));
+    m_pinButton = makeUtility("pin",QStringLiteral("置顶窗口")); m_pinButton->setCheckable(true);
+    m_themeToggleButton = makeUtility("moon",QStringLiteral("切换明暗主题"));
+    m_moreButton = makeUtility("settings",QStringLiteral("偏好设置")); m_moreButton->setCheckable(true);
+    titleBar->attachHostUtilityButtons(m_pinButton,m_themeToggleButton,m_moreButton);
+    m_searchNavButton = new QToolButton(m_actionRail);
+    m_searchNavButton->setText(QStringLiteral("‹ 返回检索"));
+    m_searchNavButton->setProperty("titleControl",true);
+    m_searchNavButton->hide();
+    static_cast<QHBoxLayout *>(titleBar->layout())->insertWidget(4,m_searchNavButton);
+    connect(m_searchNavButton,&QToolButton::clicked,this,[this]{setSettingsViewVisible(false);});
+    connect(m_moreButton,&QToolButton::clicked,this,[this]{setSettingsViewVisible(!m_settingsViewVisible);});
+    m_minimizeButton=titleBar->minimizeButton();
+    m_maximizeButton=titleBar->maximizeButton();
+    m_windowCloseButton=titleBar->closeButton();
     shell->addWidget(m_actionRail);
 
-    m_contentContainer = new QWidget(this);
-    auto *outer = new QVBoxLayout(m_contentContainer);
-    outer->setContentsMargins(0, 0, 0, 0);
-    outer->setSpacing(8);
-    shell->addWidget(m_contentContainer, 1);
+    // Main Stack: Workspace Page (Index search & browser) + Settings Host Page
+    m_mainStack = new QStackedWidget(this);
+    m_mainStack->setObjectName(QStringLiteral("smartMainStack"));
 
-    m_header = new QWidget(this);
+    m_workspacePage = new QWidget(m_mainStack);
+    m_workspacePage->setObjectName(QStringLiteral("smartWorkspacePage"));
+    m_contentContainer = m_workspacePage;
+    auto *outer = new QVBoxLayout(m_workspacePage);
+    outer->setContentsMargins(10, 0, 10, 0);
+    outer->setSpacing(0);
+
+    m_settingsHost = new QWidget(m_mainStack);
+    m_settingsHost->setObjectName(QStringLiteral("smartSettingsHost"));
+    auto *hostLayout = new QVBoxLayout(m_settingsHost);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_mainStack->addWidget(m_workspacePage);
+    m_mainStack->addWidget(m_settingsHost);
+    shell->addWidget(m_mainStack, 1);
+
+    m_header = new QWidget(m_workspacePage);
     m_header->setObjectName(QStringLiteral("smartSpaceHeader"));
-    m_header->installEventFilter(this);
     auto *headerLayout = new QVBoxLayout(m_header);
-    headerLayout->setContentsMargins(10, 10, 10, 10);
-    headerLayout->setSpacing(5);
+    headerLayout->setContentsMargins(4, 5, 4, 5);
+    m_header->setFixedHeight(AiSpace::WindowMetrics::SearchHeaderHeight);
+    headerLayout->setSpacing(6);
 
     auto makeToolButton = [this](QHBoxLayout *row, const QString &icon,
                                  const QString &text, const QString &tip,
@@ -1060,7 +1083,7 @@ void SmartSpaceWidget::buildUi()
 
     auto *commandRow = new QHBoxLayout;
     commandRow->setContentsMargins(0, 0, 0, 0);
-    commandRow->setSpacing(7);
+    commandRow->setSpacing(8);
     m_searchEdit = new QLineEdit(m_header);
     m_searchEdit->setObjectName(QStringLiteral("smartSpaceSearch"));
     m_searchEdit->setPlaceholderText(
@@ -1070,8 +1093,8 @@ void SmartSpaceWidget::buildUi()
         "空格分隔多个必须同时命中的条件，例如：宁波 pdf\n"
         "正则表达式以 re: 开头，例如：re:^宁波.*\\.pdf$"));
     m_searchEdit->setClearButtonEnabled(true);
-    m_searchEdit->setMinimumHeight(42);
-    m_searchEdit->setMinimumWidth(100);
+    m_searchEdit->setMinimumHeight(36);
+    m_searchEdit->setMinimumWidth(120);
     m_searchEdit->addAction(QIcon::fromTheme(QStringLiteral("edit-find")),
                             QLineEdit::LeadingPosition);
     commandRow->addWidget(m_searchEdit, 1);
@@ -1080,7 +1103,7 @@ void SmartSpaceWidget::buildUi()
         QStringLiteral("执行搜索（Enter）；空格表示“且”，re:表示正则"),
         QStringLiteral("accent"));
     m_searchButton->setObjectName(QStringLiteral("smartSearchButton"));
-    m_searchButton->setFixedWidth(70);
+    m_searchButton->setFixedSize(66, 36);
 
     m_indexProgress = new QProgressBar(m_header);
     m_indexProgress->setObjectName(QStringLiteral("smartIndexProgress"));
@@ -1104,16 +1127,8 @@ void SmartSpaceWidget::buildUi()
     m_categoryCombo->addItem(QStringLiteral("演示"), QStringLiteral("presentation"));
     m_categoryCombo->addItem(QStringLiteral("表格"), QStringLiteral("spreadsheet"));
     m_categoryCombo->addItem(QStringLiteral("其他"), QStringLiteral("other"));
-    m_categoryCombo->setMinimumHeight(42);
-    m_categoryCombo->setFixedWidth(256);
-    commandRow->addSpacing(8);
-    auto *headerSeparator = new QFrame(m_header);
-    headerSeparator->setObjectName(QStringLiteral("smartHeaderSeparator"));
-    headerSeparator->setFrameShape(QFrame::VLine);
-    headerSeparator->setFrameShadow(QFrame::Plain);
-    headerSeparator->setFixedWidth(1);
-    commandRow->addWidget(headerSeparator);
-    commandRow->addSpacing(4);
+    m_categoryCombo->setMinimumHeight(36);
+    m_categoryCombo->setFixedWidth(140);
     commandRow->addWidget(m_categoryCombo);
     connect(m_categoryCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int index) {
@@ -1122,22 +1137,11 @@ void SmartSpaceWidget::buildUi()
             m_selectedCategories << m_categoryCombo->itemData(index).toString();
         updateResults(true);
     });
-    m_themeToggleButton = new QToolButton(m_header);
-    m_themeToggleButton->setObjectName(QStringLiteral("smartThemeToggle"));
-    m_themeToggleButton->setProperty("themeChoice", true);
-    m_themeToggleButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    m_themeToggleButton->setFixedSize(42, 42);
-    commandRow->addWidget(m_themeToggleButton);
-    headerLayout->addLayout(commandRow);
-    headerLayout->addWidget(m_indexProgress);
 
-    auto makeHiddenButton = [this](const QString &text) {
-        auto *button = new QToolButton(m_header);
-        button->setText(text);
-        button->hide();
-        return button;
-    };
-    m_settingsButton = makeHiddenButton(QStringLiteral("设置"));
+    headerLayout->addLayout(commandRow);
+
+
+    m_settingsButton = m_moreButton;
     outer->addWidget(m_header);
 
     m_splitter = new QSplitter(Qt::Horizontal, this);
@@ -1150,8 +1154,6 @@ void SmartSpaceWidget::buildUi()
     m_folderLevelsLayout = new QVBoxLayout(m_folderLevelsContainer);
     m_folderLevelsLayout->setContentsMargins(0, 0, 0, 0);
     m_folderLevelsLayout->setSpacing(8);
-    // The root list owns the remaining space. A stretching blank after it
-    // used to reserve half the pane and hide rows in a tiny inner viewport.
     m_folderLevelsLayout->addStretch(0);
     m_folderScroll = new QScrollArea;
     m_folderScroll->setObjectName(QStringLiteral("smartFolderScroll"));
@@ -1174,7 +1176,7 @@ void SmartSpaceWidget::buildUi()
     m_splitter->setStretchFactor(1, 1);
     m_folderPanel->setMinimumWidth(260);
     m_folderPanel->setMaximumWidth(360);
-    m_splitter->setSizes({336, 1000});
+    m_splitter->setSizes({280, 600});
     outer->addWidget(m_splitter, 1);
 
     m_previewPanel = new QFrame(m_resultStack);
@@ -1189,6 +1191,8 @@ void SmartSpaceWidget::buildUi()
     previewHeader->addWidget(m_previewTitle, 1);
     m_previewCloseButton = new QToolButton(m_previewPanel);
     m_previewCloseButton->setText(QStringLiteral("×"));
+    m_previewCloseButton->setFixedSize(28,28);
+    m_previewCloseButton->setAccessibleName(QStringLiteral("关闭预览"));
     m_previewCloseButton->setToolTip(QStringLiteral("关闭预览"));
     m_previewCloseButton->setProperty("buttonRole", QStringLiteral("quiet"));
     previewHeader->addWidget(m_previewCloseButton);
@@ -1216,43 +1220,55 @@ void SmartSpaceWidget::buildUi()
     m_previewOpenButton = new QPushButton(QStringLiteral("打开文件"), m_previewPanel);
     m_previewOpenButton->setObjectName(QStringLiteral("smartPreviewOpen"));
     previewLayout->addWidget(m_previewOpenButton);
-    m_resultStack->addWidget(m_previewPanel);
+    m_previewPanel->setMinimumWidth(220);
+    m_splitter->addWidget(m_previewPanel);
+    m_splitter->setStretchFactor(2,1);
     m_previewPanel->hide();
 
     m_statusContainer = new QWidget(this);
+    m_statusContainer->setObjectName("smartStatusBar");
+    m_statusContainer->setFixedHeight(AiSpace::WindowMetrics::BottomStatusHeight);
     auto *statusRow = new QHBoxLayout(m_statusContainer);
-    statusRow->setContentsMargins(2, 0, 0, 0);
+    statusRow->setContentsMargins(10,0,4,0); statusRow->setSpacing(4);
     m_statusLabel = new QLabel(QStringLiteral("尚未建立索引"), m_statusContainer);
     m_statusLabel->setObjectName(QStringLiteral("smartSpaceStatus"));
-    statusRow->addWidget(m_statusLabel, 1);
-    m_sizeGrip = new AspectRatioSizeGrip(this, m_statusContainer);
-    m_sizeGrip->setToolTip(QStringLiteral("拖动等比例缩放AI空间"));
-    m_sizeGrip->setVisible(!m_fenceEmbedded);
-    statusRow->addWidget(m_sizeGrip, 0, Qt::AlignRight | Qt::AlignBottom);
+    m_statusLabel->setMinimumWidth(0);
+    m_statusLabel->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    statusRow->addWidget(m_statusLabel,1);
+    m_indexProgress->setParent(m_statusContainer);
+    m_indexProgress->setMinimumWidth(70); m_indexProgress->setMaximumWidth(180);
+    statusRow->addWidget(m_indexProgress,1);
+    auto createTask = [&](const QString &key,const QString &text,const QString &tip) {
+        auto *button = new QToolButton(m_statusContainer);
+        button->setProperty("railAction",true);button->setProperty("railIconKey",key);
+        button->setText(text);button->setToolTip(tip);button->setAccessibleName(tip);
+        button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        button->setIconSize(QSize(14,14));button->setFixedHeight(28);
+        statusRow->addWidget(button);return button;
+    };
+    m_idleIndexButton=createTask("database",QStringLiteral("快全量"),QStringLiteral("快速全量，不启动OCR"));
+    m_refreshButton=createTask("refresh",QStringLiteral("增量"),QStringLiteral("更新新增或变更文件"));
+    m_ocrIndexButton=createTask("ocr","OCR",QStringLiteral("识别图片与无文本层PDF"));
+    m_pauseIndexButton=createTask("pause",QStringLiteral("暂停"),QStringLiteral("安全暂停当前索引"));
+    m_pauseIndexButton->setEnabled(false);
+    auto *knowledgeMenuBtn=createTask("knowledge",QStringLiteral("知识库 ▾"),QStringLiteral("知识库管理"));
+    knowledgeMenuBtn->setObjectName("smartKnowledgeMenu");
+    connect(knowledgeMenuBtn,&QToolButton::clicked,this,&SmartSpaceWidget::showHeaderMenu);
+    m_sizeGrip=new AspectRatioSizeGrip(this,m_statusContainer);
+    m_sizeGrip->setToolTip(QStringLiteral("拖动缩放AI空间"));
+    statusRow->addWidget(m_sizeGrip);
     outer->addWidget(m_statusContainer);
-
-    m_edgeRevealButton = new QToolButton(this);
-    m_edgeRevealButton->setObjectName(QStringLiteral("smartEdgeReveal"));
-    m_edgeRevealButton->setIcon(modernRailIcon(
-        QStringLiteral("sparkle"), QColor(QStringLiteral("#2563eb")),
-        QColor(QStringLiteral("#3b82f6")), QColor(QStringLiteral("#2563eb"))));
-    m_edgeRevealButton->setIconSize(QSize(38, 38));
-    m_edgeRevealButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_edgeRevealButton->setToolTip(QStringLiteral(
-        "展开AI空间（位置与隐藏按钮对齐）"));
-    m_edgeRevealButton->setAutoRaise(false);
-    m_edgeRevealButton->setCursor(Qt::PointingHandCursor);
-    m_edgeRevealButton->hide();
+    auto *searchShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+K")),this);
+    connect(searchShortcut,&QShortcut::activated,this,[this]{
+        setSettingsViewVisible(false);m_searchEdit->setFocus();m_searchEdit->selectAll();
+    });
 
     connect(m_refreshButton, &QToolButton::clicked,
             this, &SmartSpaceWidget::startIndexing);
     connect(m_themeToggleButton, &QToolButton::clicked, this, [this] {
-        const int nextMode = m_themeMode == 1 ? 2
-            : m_themeMode == 2 ? 3 : 1;
+        const int nextMode = (m_themeMode == 2 ? 1 : 2);
         setSimpleTheme(nextMode);
     });
-    connect(m_settingsButton, &QToolButton::clicked,
-            this, &SmartSpaceWidget::showSettingsDialog);
     connect(m_idleIndexButton, &QToolButton::clicked,
             this, &SmartSpaceWidget::startIdleFullIndex);
     connect(m_ocrIndexButton, &QToolButton::clicked,
@@ -1282,12 +1298,12 @@ void SmartSpaceWidget::buildUi()
     connect(m_pinButton, &QToolButton::clicked, this, [this] {
         setAlwaysOnTop(!m_alwaysOnTop);
     });
-    connect(m_closeButton, &QToolButton::clicked,
-            this, &SmartSpaceWidget::hideToNearestEdge);
-    connect(m_moreButton, &QToolButton::clicked,
-            this, &SmartSpaceWidget::showHeaderMenu);
-    connect(m_edgeRevealButton, &QToolButton::clicked,
-            this, &SmartSpaceWidget::revealFromEdge);
+    connect(m_minimizeButton, &QToolButton::clicked,
+            this, &SmartSpaceWidget::minimizeWindow);
+    connect(m_maximizeButton, &QToolButton::clicked,
+            this, &SmartSpaceWidget::toggleMaximized);
+    connect(m_windowCloseButton, &QToolButton::clicked,
+            this, &SmartSpaceWidget::closeRequested);
     connect(m_previewCloseButton, &QToolButton::clicked,
             this, &SmartSpaceWidget::hidePreview);
     connect(m_previewOpenButton, &QPushButton::clicked, this, [this] {
@@ -1334,89 +1350,82 @@ void SmartSpaceWidget::buildUi()
 
     rebuildCategoryPills();
 
-    SettingsComboPopup::install(m_header);
-
     if (m_fenceEmbedded) {
         m_actionRail->hide();
-        m_header->removeEventFilter(this);
         outer->setContentsMargins(6, 6, 6, 4);
     }
 }
 
 void SmartSpaceWidget::applyTheme()
 {
-    const bool glassMode = m_themeMode == 3;
-    const bool lightMode = m_themeMode == 2;
+    const bool lightMode = (m_themeMode == 2);
     m_customOpacity = 100;
     m_customColorsEnabled = false;
-    if (glassMode) {
-        // Keep the material neutral and let the captured desktop supply the
-        // color. A strong blue tint makes the surface read as a panel.
-        m_surfaceColor = QColor(13, 18, 27, 92);
-        m_cardColor = QColor(18, 24, 34, 76);
-        m_borderColor = QColor(244, 249, 255, 42);
-        m_textColor = QColor(247, 249, 252);
-        m_mutedColor = QColor(202, 210, 220);
-        m_accentColor = QColor(112, 205, 255);
-    } else if (lightMode) {
-        m_surfaceColor = QColor(QStringLiteral("#f8fafc"));
+
+    if (lightMode) {
+        m_surfaceColor = QColor(QStringLiteral("#f4f6fa"));
         m_cardColor = QColor(QStringLiteral("#ffffff"));
-        m_borderColor = QColor(QStringLiteral("#e2e8f0"));
-        m_textColor = QColor(QStringLiteral("#1e293b"));
+        m_borderColor = QColor(QStringLiteral("#dce3ed"));
+        m_textColor = QColor(QStringLiteral("#0f172a"));
         m_mutedColor = QColor(QStringLiteral("#64748b"));
         m_accentColor = QColor(QStringLiteral("#2563eb"));
     } else {
-        m_surfaceColor = QColor(QStringLiteral("#0f172a"));
-        m_cardColor = QColor(QStringLiteral("#1e293b"));
-        m_borderColor = QColor(QStringLiteral("#334155"));
+        m_surfaceColor = QColor(QStringLiteral("#0b1120"));
+        m_cardColor = QColor(QStringLiteral("#131c31"));
+        m_borderColor = QColor(QStringLiteral("#29364d"));
         m_textColor = QColor(QStringLiteral("#f1f5f9"));
         m_mutedColor = QColor(QStringLiteral("#94a3b8"));
         m_accentColor = QColor(QStringLiteral("#3b82f6"));
     }
     setFont(QFont());
-    setAttribute(Qt::WA_OpaquePaintEvent, !glassMode);
-    setAttribute(Qt::WA_NoSystemBackground, glassMode && isWindow());
+    setAttribute(Qt::WA_OpaquePaintEvent, false);
+    setAttribute(Qt::WA_NoSystemBackground, isWindow());
     setAttribute(Qt::WA_StyledBackground, false);
-    setAutoFillBackground(!glassMode);
-    if (m_themeMode != 3 || m_fenceEmbedded)
-        m_glassMaterial = {};
-    if (!m_fenceEmbedded && layout()) {
-        const int inset = glassMode ? (m_glassOpticsEnabled ? 16 : 12) : 4;
-        layout()->setContentsMargins(inset, inset, inset, inset);
+    setAutoFillBackground(false);
+
+    setProperty("smartGlassMaterialBackend","solid");
+    setProperty("smartGlassMaterialBuilds",0);
+    setProperty("smartGlassUsedGpu",false);
+
+    if (layout()) {
+        const int m = isWindowMaximized() ? 0 : 1;
+        layout()->setContentsMargins(m, m, m, m);
     }
-    if (m_glassPointerEffect)
-        m_glassPointerEffect->setEnabled(glassMode && !m_fenceEmbedded && !m_edgeHidden);
-    if (glassMode) {
-        QPalette transparentPalette = palette();
-        transparentPalette.setColor(QPalette::Window, Qt::transparent);
-        transparentPalette.setColor(QPalette::Base, Qt::transparent);
-        setPalette(transparentPalette);
-    }
+
     if (m_themeToggleButton) {
         const QSignalBlocker blocker(m_themeToggleButton);
-        m_themeToggleButton->setText(glassMode ? QStringLiteral("✦")
-            : lightMode ? QStringLiteral("☀") : QStringLiteral("☾"));
-        m_themeToggleButton->setToolTip(glassMode
-            ? QStringLiteral("当前为液态玻璃，点击切换为黑夜模式")
-            : lightMode
-                ? QStringLiteral("当前为白天模式，点击切换为液态玻璃")
-                : QStringLiteral("当前为黑夜模式，点击切换为白天模式"));
+        m_themeToggleButton->setText(lightMode ? QStringLiteral("☀") : QStringLiteral("☾"));
+        m_themeToggleButton->setToolTip(lightMode
+            ? QStringLiteral("当前为白天模式，点击切换为黑夜模式")
+            : QStringLiteral("当前为黑夜模式，点击切换为白天模式"));
     }
+
     if (m_actionRail) {
         const QList<QToolButton *> railButtons =
-            m_actionRail->findChildren<QToolButton *>();
+            findChildren<QToolButton *>();
         for (QToolButton *button : railButtons) {
             const QString key = button->property("railIconKey").toString();
             if (key.isEmpty())
                 continue;
-            button->setIcon(modernRailIcon(
-                key, m_mutedColor, m_textColor, Qt::white));
+            if (button->property("titleClose").toBool()) {
+                button->setIcon(modernRailIcon(
+                    key, m_mutedColor, Qt::white, Qt::white));
+            } else if (button->property("navSegment").toBool()) {
+                button->setIcon(modernRailIcon(
+                    key, m_mutedColor, m_accentColor, m_accentColor));
+            } else if (button->property("titleControl").toBool()) {
+                button->setIcon(modernRailIcon(
+                    key, m_mutedColor, m_textColor, m_accentColor));
+            } else {
+                button->setIcon(modernRailIcon(
+                    key, m_mutedColor, m_accentColor, Qt::white));
+            }
         }
     }
+    updateWindowStateButtons();
 
     QPalette widgetPalette = palette();
-    widgetPalette.setColor(QPalette::Window,
-                          glassMode ? QColor(Qt::transparent) : m_surfaceColor);
+    widgetPalette.setColor(QPalette::Window, m_surfaceColor);
     widgetPalette.setColor(QPalette::WindowText, m_textColor);
     widgetPalette.setColor(QPalette::Base, m_cardColor);
     widgetPalette.setColor(QPalette::Text, m_textColor);
@@ -1437,277 +1446,184 @@ void SmartSpaceWidget::applyTheme()
     }
 
     QColor hover = m_accentColor;
-    hover.setAlpha(42);
-    QColor selected = m_accentColor;
-    selected.setAlpha(185);
-    QColor field = m_cardColor;
-    field.setAlpha(glassMode ? 82 : qMax(220, field.alpha()));
+    hover.setAlpha(lightMode ? 14 : 32);
+    QColor fieldBg = lightMode ? QColor(255,255,255,42) : QColor(15,23,42,36);
+    QColor cardBorder = m_borderColor;
+    QColor accentHover = m_accentColor.darker(110);
 
-    QColor searchBg = field;
-    QColor searchText = m_textColor;
-    QColor buttonBg = selected;
-    QColor buttonText(Qt::white);
-    QColor buttonHover = hover;
-
-    const QColor warningFill(245, 158, 11, 45);
-    const QColor warningBorder(245, 158, 11, 115);
-    QString style = QStringLiteral(R"(
-        QWidget { color: %1; font-size: 13px; }
-        QWidget#smartSpaceHeader {
-            background: transparent; border: none;
-        }
-        #smartSpaceSearch { color: %9; background: transparent; border: 1px solid transparent;
-                            border-bottom-color: %3; border-radius: 0;
-                            padding-left: 10px; padding-right: 10px;
-                            font-size: 14px; }
-        #smartSpaceSearch:focus { border-bottom-color: %5; }
-        QComboBox#smartCategoryFilter { background: transparent; border-color: transparent; }
-        QComboBox#smartCategoryFilter:focus { border-color: transparent; border-bottom-color: %5; }
-        #smartHeaderSeparator { background: %3; }
-        #smartSpaceStatus { color: %2; background: transparent; border: none;
-                            padding: 5px 9px; }
-        QFrame#smartFolderPanel, QFrame#smartFilePanel, QFrame#smartPreviewPanel {
-            background: transparent; border: none;
-        }
-        QStackedWidget#smartResultStack { background: transparent; border: none; }
+    const QString style = QStringLiteral(R"(
+        QWidget { color: %1; font-size: 13px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         QFrame#smartActionRail {
             background: transparent; border: none;
         }
-        #smartPreviewTitle { color: %1; font-size: 14px; font-weight: 600; }
-        #smartPreviewMeta { color: %2; font-size: 12px; }
-        QTextBrowser#smartPreviewText { color: %1; background: transparent;
-                                        border: none; padding: 4px; }
-        QLabel#smartPreviewImage { background: transparent; }
-        QPushButton#smartPreviewOpen {
-            color: %1; background: transparent; border: 1px solid transparent;
-            border-radius: 9px; padding: 8px 14px; font-weight: 600;
+        QLabel#smartBrandTitle {
+            font-size: 12px; font-weight: 600; color: %1;
         }
-        QPushButton#smartPreviewOpen:hover { background: %6; }
-        QPushButton#smartPreviewOpen:focus { background: transparent; border-bottom-color: %5; }
-        QLabel[panelTitle="true"] { color: %1; font-size: 13px; font-weight: 600;
-                                     padding: 1px 2px 3px 2px; }
+        QFrame#smartNavSegment {
+            background: %4; border: 1px solid %3; border-radius: 16px;
+        }
+        QToolButton[navSegment="true"] {
+            color: %5; background: transparent; border: none; border-radius: 14px;
+            padding: 4px 12px; font-size: 12px; font-weight: 600;
+        }
+        QToolButton[navSegment="true"]:hover { color: %1; }
+        QToolButton[navSegment="true"]:checked {
+            color: %6; background: %2; font-weight: 700;
+        }
+        QToolButton[railAction="true"] {
+            color: %1; background: transparent; border: none;
+            border-radius: 7px; padding: 2px 9px; font-size: 12px; font-weight: 500;
+        }
+        QToolButton[railAction="true"]:hover {
+            background: %7; border-color: %6; color: %6;
+        }
+        QToolButton[railAction="true"]:disabled {
+            color: %5; border-color: transparent; background: transparent;
+        }
+        QFrame#smartRailSeparator {
+            background: %3;
+        }
+        QToolButton[titleControl="true"] {
+            color: %5; background: transparent; border: none;
+            border-radius: 6px; padding: 0; font-size: 16px; font-weight: 600;
+        }
+        QToolButton[titleControl="true"]:hover {
+            color: %1; background: %7;
+        }
+        QToolButton[titleControl="true"]:checked {
+            color: %6; background: %7;
+        }
+        QToolButton[titleClose="true"] {
+            color: %5; background: transparent; border: none;
+            border-radius: 6px; padding: 0;
+        }
+        QToolButton[titleClose="true"]:hover {
+            color: white; background: #ef4444;
+        }
+        QStackedWidget#smartMainStack { background: transparent; border: none; }
+        QWidget#smartWorkspacePage { background: transparent; }
+        QWidget#smartSpaceHeader { background: transparent; border: none; }
+        #smartSpaceSearch {
+            color: %1; background: %2; border: 1.5px solid %3;
+            border-radius: 10px; padding-left: 12px; padding-right: 12px;
+            font-size: 14px;
+        }
+        #smartSpaceSearch:focus { border-color: %6; }
+        QToolButton#smartSearchButton {
+            color: white; background: %6; border: 1px solid %6;
+            border-radius: 10px; font-weight: 600; font-size: 13px;
+        }
+        QToolButton#smartSearchButton:hover { background: %8; border-color: %8; }
+        QComboBox#smartCategoryFilter {
+            color: %1; background: %2; border: 1.5px solid %3;
+            border-radius: 10px; padding-left: 12px; padding-right: 10px;
+        }
+        QComboBox#smartCategoryFilter:focus { border-color: %6; }
+        QComboBox::drop-down { width: 24px; border: none; }
+        QComboBox QAbstractItemView {
+            color: %1; background: %2; border: 1px solid %3; border-radius: 8px;
+            selection-background-color: %6; selection-color: white;
+            padding: 4px; outline: none;
+        }
+        #smartSpaceStatus { color: %5; background: transparent; border: none; padding: 3px 6px; font-size: 12px; }
+        QFrame#smartFolderPanel, QFrame#smartFilePanel, QFrame#smartPreviewPanel {
+            background: transparent; border: none; border-radius: 10px;
+        }
+        QStackedWidget#smartResultStack { background: transparent; border: none; }
+        #smartPreviewTitle { color: %1; font-size: 15px; font-weight: 600; }
+        #smartPreviewMeta { color: %5; font-size: 12px; }
+        QTextBrowser#smartPreviewText { color: %1; background: transparent; border: none; padding: 6px; }
+        QLabel#smartPreviewImage { background: transparent; }
+        QToolButton[buttonRole="quiet"] {
+            color: %5; background: transparent; border: none;
+            border-radius: 6px; padding: 0; font-size: 20px;
+        }
+        QToolButton[buttonRole="quiet"]:hover { color: %1; background: %7; }
+        QPushButton#smartPreviewOpen {
+            color: white; background: %6; border: 1px solid %6;
+            border-radius: 8px; padding: 8px 16px; font-weight: 600;
+        }
+        QPushButton#smartPreviewOpen:hover { background: %8; border-color: %8; }
+        QLabel[panelTitle="true"] { color: %1; font-size: 13px; font-weight: 600; }
         QLabel#smartPanelIcon { background: transparent; padding: 0; }
         QLabel#smartPanelCount {
-            color: %2; background: transparent; border: none;
-            padding: 3px 8px; font-size: 12px; font-weight: 600;
+            color: %5; background: %4; border-radius: 10px;
+            padding: 2px 8px; font-size: 11px; font-weight: 600;
         }
-        QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {
-            color: %9; background: %10; border: 1px solid %3;
-            border-radius: 8px; padding: 7px 10px; selection-background-color: %5;
+        QToolButton[panelControl="true"] {
+            color: %5; background: %4; border: 1px solid %3;
+            border-radius: 6px; padding: 2px 8px; font-size: 12px;
         }
-        QLineEdit:focus, QComboBox:focus { border: 1px solid %5; }
-        QComboBox::drop-down { width: 26px; border: none; }
-        QComboBox QAbstractItemView {
-            color: %1; background: %4; border: 1px solid %3;
-            selection-background-color: %5;
-        }
+        QToolButton[panelControl="true"]:hover { color: %1; border-color: %6; }
         QListWidget { color: %1; background: transparent; border: none; outline: none; }
-        QListWidget::item { min-height: 25px; padding: 5px 7px; border-radius: 7px; }
-        QListWidget::item:hover { background: %6; }
-        QListWidget::item:selected { background: %5; color: white; }
-        QListWidget::item:disabled { color: %2; }
+        QListWidget::item { min-height: 26px; padding: 4px 6px; border-radius: 7px; }
+        QListWidget::item:hover { background: %7; }
+        QListWidget::item:selected { background: %6; color: white; }
+        QListWidget::item:disabled { color: %5; }
         QWidget#fileResultCard {
             background: transparent; border: 1px solid transparent; border-radius: 8px;
         }
-        QWidget#fileResultCard:hover { background: %6; }
+        QWidget#fileResultCard:hover { background: %7; border-color: %3; }
         QLabel[cardName="true"] { color: %1; font-size: 13px; font-weight: 600; }
-        QLabel[cardMeta="true"] { color: %2; font-size: 11px; }
-        QLabel[cardSnippet="true"] { color: %2; font-size: 12px; }
+        QLabel[cardMeta="true"] { color: %5; font-size: 11px; }
+        QLabel[cardSnippet="true"] { color: %5; font-size: 12px; }
         QLabel[matchScore="true"] {
             color: #10b981; background: transparent; font-size: 11px;
             font-weight: 600; padding: 2px 4px;
         }
         QLabel[matchLevel="medium"] { color: #f59e0b; }
-        QToolButton { color: %1; background: transparent; padding: 6px 10px;
-                      border: 1px solid transparent; border-radius: 8px; }
-        QToolButton#smartSearchButton {
-            padding-left: 5px; padding-right: 5px;
-        }
-        QToolButton:hover { background: %13; }
-        QToolButton[buttonRole="quiet"] { background: transparent; }
-        QToolButton[buttonRole="accent"] { color: %1; background: transparent; font-weight: 600; }
-        QToolButton[buttonRole="accent"]:hover { background: %6; }
-        QToolButton[buttonRole="accent"]:pressed { color: %11; background: %12; }
-        QToolButton[buttonRole="warning"] { color: #d99728; background: transparent; }
-        QToolButton[buttonRole="warning"]:hover { background: %7; }
-        QToolButton[buttonRole="warning"]:focus { border-bottom-color: %8; }
-        QToolButton[titleAction="true"] {
-            color: %2; background: transparent; border: none;
-            border-radius: 15px; padding: 5px 10px; min-height: 20px;
-        }
-        QToolButton[titleAction="true"]:hover { color: %1; background: %13; }
-        QToolButton[titleAction="true"]:checked {
-            color: %1; background: %6; font-weight: 600;
-        }
-        QToolButton[themeChoice="true"] {
-            color: %2; background: transparent; border: 1px solid transparent;
-            border-radius: 8px; padding: 6px 10px;
-        }
-        QToolButton[themeChoice="true"]:hover { color: %1; background: %13; }
-        QToolButton[themeChoice="true"]:checked {
-            color: %1; background: %6;
-            font-weight: 600;
-        }
-        QToolButton#smartThemeToggle {
-            font-size: 20px; font-weight: 600; padding: 0;
-        }
-        QToolButton[railAction="true"] {
-            color: %2; background: transparent; border: 1px solid transparent;
-            border-radius: 9px; padding: 3px 0; font-size: 10px;
-        }
-        QToolButton[railAction="true"]:hover {
-            color: %1; background: %6;
-        }
-        QToolButton[railAction="true"]:checked {
-            color: %1; background: %6;
-            font-weight: 600;
-        }
-        QToolButton[pill="true"] {
-            color: %2; background: transparent; border: 1px solid transparent;
-            border-radius: 15px; padding: 5px 11px; min-height: 20px;
-        }
-        QToolButton#smartManageButton {
-            padding-left: 7px; padding-right: 7px;
-        }
-        QToolButton[pill="true"]:hover { color: %1; background: %13; }
-        QToolButton[pill="true"]:checked {
-            color: %1; background: %6; font-weight: 600;
-        }
-        QToolButton[pill="true"]::menu-indicator {
-            image: none; width: 0px;
-        }
         QToolButton[previewAction="true"] {
-            color: %2; background: transparent; border: 1px solid transparent;
-            border-radius: 8px; padding: 4px 7px;
+            color: %6; background: %7; border: 1px solid transparent;
+            border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: 600;
         }
-        QToolButton[previewAction="true"]:hover {
-            color: %1; background: %6;
-        }
+        QToolButton[previewAction="true"]:hover { color: white; background: %6; }
         QToolButton[loadMoreResults="true"] {
-            color: %1; background: transparent; border: 1px solid transparent;
-            border-radius: 9px; padding: 7px 12px; font-weight: 600;
+            color: %6; background: %7; border: 1px solid %3;
+            border-radius: 8px; padding: 8px 16px; font-weight: 600;
         }
-        QToolButton[loadMoreResults="true"]:hover {
-            color: %1; background: %6;
-        }
-        QToolButton[panelControl="true"] {
-            color: %2; background: transparent; border: 1px solid transparent;
-            border-radius: 7px; padding: 0 12px; font-size: 13px;
-        }
-        QToolButton[panelControl="true"]:hover { color: %1; background: %13; }
-        QToolButton#smartEdgeReveal {
-            color: %12; background: transparent; border: none;
-            border-radius: 0; padding: 0;
-        }
-        QToolButton#smartEdgeReveal:hover {
-            color: %1; background: transparent;
-        }
-        QToolButton:disabled { color: %2; background: transparent; border-color: transparent; }
-        QToolButton:focus { background: transparent; border-bottom-color: %5; }
-        QToolButton:pressed { background: %6; }
-        QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }
+        QToolButton[loadMoreResults="true"]:hover { color: white; background: %6; }
         QProgressBar#smartIndexProgress {
-            color: %1; background: transparent; border: none;
+            color: %1; background: %4; border: 1px solid %3;
             border-radius: 7px; text-align: center; font-size: 11px;
-            font-weight: 600; padding: 1px;
+            font-weight: 600;
         }
         QProgressBar#smartIndexProgress::chunk {
-            background: %12; border-radius: 5px;
+            background: %6; border-radius: 5px;
         }
         QSplitter#smartMainSplitter::handle:horizontal {
-            background: transparent; width: 8px; margin: 9px 3px;
+            background: transparent; width: 6px;
         }
         QSplitter#smartMainSplitter::handle:horizontal:hover {
-            background: %12;
+            background: %6;
         }
-        QSplitter#smartContentSplitter::handle:vertical {
-            background: transparent; height: 8px; margin: 3px 9px;
-            border-radius: 3px;
-        }
-        QSplitter#smartContentSplitter::handle:vertical:hover {
-            background: %12;
-        }
-        QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; }
+        QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }
+        QScrollBar:vertical { background: transparent; width: 6px; margin: 2px; }
         QScrollBar::handle:vertical { background: %3; border-radius: 3px; min-height: 24px; }
+        QScrollBar::handle:vertical:hover { background: %5; }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
     )")
         .arg(cssColor(m_textColor))
+        .arg(cssColor(m_cardColor))
+        .arg(cssColor(cardBorder))
+        .arg(cssColor(fieldBg))
         .arg(cssColor(m_mutedColor))
-        .arg(cssColor(m_borderColor))
-        .arg(cssColor(field))
-        .arg(cssColor(selected))
+        .arg(cssColor(m_accentColor))
         .arg(cssColor(hover))
-        .arg(cssColor(warningFill))
-        .arg(cssColor(warningBorder))
-        .arg(cssColor(searchText))
-        .arg(cssColor(searchBg))
-        .arg(cssColor(buttonText))
-        .arg(cssColor(buttonBg))
-        .arg(cssColor(buttonHover));
-    if (glassMode) {
-        style += QStringLiteral(R"(
-            #smartSpaceSearch { border-bottom-color: rgba(244, 249, 255, 48); }
-            #smartSpaceSearch:focus, QComboBox#smartCategoryFilter:focus {
-                border-bottom-color: rgba(112, 205, 255, 200);
-            }
-            QToolButton:hover, QToolButton[railAction="true"]:hover,
-            QToolButton[pill="true"]:hover, QToolButton[previewAction="true"]:hover,
-            QToolButton[panelControl="true"]:hover, QToolButton[themeChoice="true"]:hover,
-            QToolButton[buttonRole="accent"]:hover, QToolButton[titleAction="true"]:hover,
-            QToolButton[loadMoreResults="true"]:hover, QPushButton#smartPreviewOpen:hover {
-                background: rgba(255, 255, 255, 24);
-            }
-            QToolButton:focus, QPushButton#smartPreviewOpen:focus {
-                background: transparent; border-bottom-color: rgba(112, 205, 255, 160);
-            }
-            QToolButton[railAction="true"]:checked,
-            QToolButton[pill="true"]:checked, QToolButton[themeChoice="true"]:checked,
-            QToolButton[titleAction="true"]:checked {
-                color: rgb(174, 229, 255); background: rgba(112, 205, 255, 28);
-            }
-            QToolButton:pressed { background: rgba(255, 255, 255, 38); }
-            QToolButton:disabled { color: rgba(202, 210, 220, 115); background: transparent; }
-            QWidget#fileResultCard:hover, QListWidget::item:hover {
-                background: rgba(255, 255, 255, 20);
-            }
-            QListWidget::item:selected { background: rgba(112, 205, 255, 42); }
-            QTextBrowser#smartPreviewText { background: transparent; border: none; padding: 10px; }
-            QScrollArea#smartPreviewImageScroll,
-            QScrollArea#smartPreviewImageScroll > QWidget > QWidget,
-            QLabel#smartPreviewImage { background: transparent; }
-            QProgressBar#smartIndexProgress::chunk { background: rgba(89, 200, 255, 145); }
-            QToolButton#smartEdgeReveal, QToolButton#smartEdgeReveal:hover,
-            QToolButton#smartEdgeReveal:focus { background: transparent; border: none; }
-            QComboBox QAbstractItemView {
-                background: rgb(28, 33, 42); color: rgb(247, 249, 252);
-                selection-background-color: rgb(48, 88, 118);
-            }
-        )");
-    }
+        .arg(cssColor(accentHover));
+
     setStyleSheet(style);
+    styleModernCombos(this);
     updateRoundedMask();
-    if (glassMode)
-        scheduleGlassBackdropRefresh();
     update();
     emit themeChanged(m_surfaceColor, m_textColor);
 }
 
 void SmartSpaceWidget::setSimpleTheme(int mode, bool persist)
 {
-    const int normalized = mode == 3 ? 3 : mode == 2 ? 2 : 1;
+    const int normalized = (mode==2 ? 2 : 1);
     if (m_themeMode != normalized) {
         m_themeMode = normalized;
         applyTheme();
-    } else if (m_themeToggleButton) {
-        const bool lightMode = normalized == 2;
-        const bool glassMode = normalized == 3;
-        m_themeToggleButton->setText(glassMode ? QStringLiteral("✦")
-            : lightMode ? QStringLiteral("☀") : QStringLiteral("☾"));
-        m_themeToggleButton->setToolTip(glassMode
-            ? QStringLiteral("当前为液态玻璃，点击切换为黑夜模式")
-            : lightMode
-                ? QStringLiteral("当前为白天模式，点击切换为液态玻璃")
-                : QStringLiteral("当前为黑夜模式，点击切换为白天模式"));
     }
     if (persist)
         saveSettings();
@@ -1715,22 +1631,14 @@ void SmartSpaceWidget::setSimpleTheme(int mode, bool persist)
 
 void SmartSpaceWidget::setGlassOpticsEnabled(bool enabled, bool persist)
 {
-    if(m_glassOpticsEnabled!=enabled) {
-        m_glassOpticsEnabled=enabled;
-        m_glassMaterial={};m_glassBackdrop={};m_glassBackdropGeometry={};
-        m_standaloneGlassRenderer.reset();
-        if (m_themeMode == 3 && !m_fenceEmbedded && layout()) {
-            const int inset = enabled ? 16 : 12;
-            layout()->setContentsMargins(inset, inset, inset, inset);
-        }
-        refreshGlassBackdrop();update();
-    }
-    if(persist)saveSettings();
+    // Retain the legacy process interface without re-enabling removed effects.
+    Q_UNUSED(enabled);
+    if (persist) saveSettings();
 }
 
 void SmartSpaceWidget::refreshInheritedTheme()
 {
-    // The redesigned UI intentionally has two explicit, opaque palettes.
+    // Standalone solid themes do not inherit a desktop wallpaper or material.
 }
 
 void SmartSpaceWidget::applyMenuTheme(QMenu *menu) const
@@ -2018,13 +1926,6 @@ void SmartSpaceWidget::showHeaderMenu()
                                QFileInfo::exists(knowledgeDbPath()));
     knowledgeStop->setEnabled(knowledgeBusy);
     menu.addSeparator();
-    QAction *optics=menu.addAction(QStringLiteral("分区同款玻璃（预览）"));
-    optics->setObjectName(QStringLiteral("smartGlassOpticsAction"));
-    optics->setCheckable(true);optics->setChecked(m_glassOpticsEnabled);
-    connect(optics,&QAction::triggered,this,[this](bool enabled){
-        if(enabled)setSimpleTheme(3,false);
-        setGlassOpticsEnabled(enabled);
-    });
     QAction *settings = menu.addAction(
         smartMenuIcon(QStringLiteral("settings")),
         QStringLiteral("AI空间设置"));
@@ -2053,12 +1954,12 @@ void SmartSpaceWidget::showHeaderMenu()
     connect(settings, &QAction::triggered, this,
             &SmartSpaceWidget::showSettingsDialog);
     connect(close, &QAction::triggered, this, &SmartSpaceWidget::closeRequested);
-    LiquidPopup::execAt(menu,m_moreButton);
+    execMenuAt(menu, m_moreButton);
 }
 
 void SmartSpaceWidget::updateResponsiveLayout()
 {
-    if (!m_splitter || m_edgeHidden)
+    if (!m_splitter)
         return;
     const bool compact = width() < 760;
     const bool breakpointChanged =
@@ -2076,9 +1977,24 @@ void SmartSpaceWidget::updateResponsiveLayout()
             m_splitter->setSizes({available * 34 / 100,
                                   available * 66 / 100});
     }
-    if (m_resultStack)
-        m_resultStack->setCurrentWidget(m_previewVisible
-            ? static_cast<QWidget *>(m_previewPanel) : m_resultPage);
+    const bool docked = width() >= 1100;
+    if (m_previewPanel && m_resultStack) {
+        if (docked && m_previewPanel->parentWidget()!=m_splitter) {
+            m_resultStack->setCurrentWidget(m_resultPage);
+            m_previewPanel->setParent(m_splitter);m_splitter->addWidget(m_previewPanel);
+        } else if (!docked && m_previewPanel->parentWidget()!=m_resultStack) {
+            m_previewPanel->setParent(m_resultStack);m_resultStack->addWidget(m_previewPanel);
+        }
+        if (docked) {
+            m_resultStack->setCurrentWidget(m_resultPage);
+            m_previewPanel->setVisible(m_previewVisible);
+            if (m_previewVisible && !property("previewDocked").toBool())
+                m_splitter->setSizes({width()*3/12,width()*5/12,width()*4/12});
+        } else m_resultStack->setCurrentWidget(m_previewVisible ? static_cast<QWidget *>(m_previewPanel) : m_resultPage);
+        setProperty("previewDocked",docked && m_previewVisible);
+        setProperty("previewVisible",m_previewVisible);
+    }
+
 }
 
 void SmartSpaceWidget::restoreSettings()
@@ -2122,16 +2038,9 @@ void SmartSpaceWidget::restoreSettings()
         QStringLiteral("indexIntervalMinutes"), 30).toInt(), 1440);
     const int storedThemeMode = qBound(0, settings.value(
         QStringLiteral("themeMode"), 3).toInt(), 6);
-    m_glassOpticsEnabled=settings.value(QStringLiteral("glassOptics"),true).toBool();
     m_customBaseSkin = qBound(0, settings.value(
         QStringLiteral("customBaseSkin"), 0).toInt(), 4);
-    if (storedThemeMode == 3)
-        m_themeMode = 3;
-    else if (storedThemeMode == 2 ||
-             (storedThemeMode == 6 && m_customBaseSkin == 1))
-        m_themeMode = 2;
-    else
-        m_themeMode = 1;
+    m_themeMode = (storedThemeMode==2 ? 2 : 1);
     m_customOpacity = qBound(25, settings.value(
         QStringLiteral("customOpacity"), 100).toInt(), 100);
     m_customColorsEnabled = settings.value(
@@ -2177,8 +2086,7 @@ void SmartSpaceWidget::restoreSettings()
     m_autoStart = settings.value(QStringLiteral("autoStart"), false).toBool();
     m_alwaysOnTop = settings.value(
         QStringLiteral("alwaysOnTop"), false).toBool();
-    m_defaultHidden = settings.value(
-        QStringLiteral("defaultHidden"), false).toBool();
+    settings.remove(QStringLiteral("defaultHidden"));
     m_knowledgeDirectory = settings.value(
         QStringLiteral("knowledgeDirectory"),
         QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
@@ -2192,9 +2100,8 @@ void SmartSpaceWidget::restoreSettings()
                                       providerConfigPath()).toString();
     const QSize storedSize = settings.value(
         QStringLiteral("size"), QSize(kDefaultWidth, kDefaultHeight)).toSize();
-    m_expandedSize = storedSize.expandedTo(minimumSize());
     if (!m_fenceEmbedded)
-        resize(m_expandedSize);
+        resize(storedSize.expandedTo(minimumSize()));
     QPoint position = settings.value(QStringLiteral("position"),
                                      QPoint(-1, -1)).toPoint();
     settings.endGroup();
@@ -2229,7 +2136,6 @@ void SmartSpaceWidget::restoreSettings()
     }
     if (!m_fenceEmbedded) {
         move(boundedPosition(position));
-        m_expandedPosition = pos();
     }
 }
 
@@ -2250,7 +2156,7 @@ void SmartSpaceWidget::saveSettings() const
     settings.setValue(QStringLiteral("indexIntervalMinutes"),
                       m_indexIntervalMinutes);
     settings.setValue(QStringLiteral("themeMode"), m_themeMode);
-    settings.setValue(QStringLiteral("glassOptics"), m_glassOpticsEnabled);
+    settings.setValue(QStringLiteral("glassOptics"), false);
     settings.setValue(QStringLiteral("customBaseSkin"), m_customBaseSkin);
     settings.setValue(QStringLiteral("customOpacity"), m_customOpacity);
     settings.setValue(QStringLiteral("customColorsEnabled"), m_customColorsEnabled);
@@ -2289,7 +2195,7 @@ void SmartSpaceWidget::saveSettings() const
     settings.setValue(QStringLiteral("resultSortMode"), m_resultSortMode);
     settings.setValue(QStringLiteral("autoStart"), m_autoStart);
     settings.setValue(QStringLiteral("alwaysOnTop"), m_alwaysOnTop);
-    settings.setValue(QStringLiteral("defaultHidden"), m_defaultHidden);
+    settings.remove(QStringLiteral("defaultHidden"));
     settings.setValue(QStringLiteral("knowledgeDirectory"),
                       m_knowledgeDirectory);
     settings.setValue(QStringLiteral("knowledgeChunkSize"),
@@ -2298,10 +2204,10 @@ void SmartSpaceWidget::saveSettings() const
                       m_knowledgeOverlap);
     settings.setValue(QStringLiteral("providerConfig"), m_providerConfig);
     if (!m_fenceEmbedded) {
-        settings.setValue(QStringLiteral("position"),
-                          m_edgeHidden ? m_expandedPosition : pos());
-        settings.setValue(QStringLiteral("size"),
-                          m_edgeHidden ? m_expandedSize : size());
+        const QRect normal = isWindowMaximized() && m_normalGeometry.isValid()
+            ? m_normalGeometry : geometry();
+        settings.setValue(QStringLiteral("position"),normal.topLeft());
+        settings.setValue(QStringLiteral("size"),normal.size());
     }
     settings.endGroup();
     settings.sync();
@@ -2367,7 +2273,6 @@ void SmartSpaceWidget::setResultDensity(int density)
 
 void SmartSpaceWidget::recreateNativeSurface(bool translucent)
 {
-    finishEdgeTransition();
     // WA_TranslucentBackground affects the X11 visual chosen while the native
     // window is created.  Reparenting an already-created 24-bit child window
     // is insufficient: Qt otherwise keeps the old visual and the alpha edge
@@ -2377,7 +2282,7 @@ void SmartSpaceWidget::recreateNativeSurface(bool translucent)
     if (wasVisible)
         hide();
     destroy(true, true);
-    const bool glassSurface = m_themeMode == 3;
+    const bool glassSurface = false;
     // Only top-level windows get an ARGB visual. Desktop children share the
     // canvas backing store and must preserve its pixels outside the material.
     setAttribute(Qt::WA_TranslucentBackground, translucent);
@@ -2385,59 +2290,9 @@ void SmartSpaceWidget::recreateNativeSurface(bool translucent)
     setAttribute(Qt::WA_OpaquePaintEvent, !translucent && !glassSurface);
     setAttribute(Qt::WA_StyledBackground, false);
     setAutoFillBackground(!(translucent || glassSurface));
-    if (m_themeMode == 3)
-        refreshGlassBackdrop();
     updateRoundedMask();
     if (wasVisible)
         show();
-}
-
-void SmartSpaceWidget::invalidateWallpaper()
-{
-    m_glassMaterial={};m_glassBackdrop={};m_glassBackdropGeometry={};
-    refreshGlassBackdrop();update();
-}
-
-void SmartSpaceWidget::scheduleGlassBackdropRefresh()
-{
-    if (m_themeMode != 3 || m_edgeHidden)
-        return;
-    // Restart on each geometry event; moving/resizing reuses the old image
-    // until the pointer settles instead of running a large shader every frame.
-    m_glassBackdropRefreshTimer.start(80);
-}
-
-void SmartSpaceWidget::refreshGlassBackdrop()
-{
-    if (m_themeMode != 3 || m_edgeHidden || width() < 2 || height() < 2) return;
-    const QRect area(mapToGlobal(QPoint()),size());
-    const qreal dpr=devicePixelRatioF();
-    if (!m_glassMaterial.isNull() && m_glassBackdropGeometry==area
-        && qFuzzyCompare(m_glassBackdropDpr,dpr)) return;
-    QScreen *screen=QGuiApplication::screenAt(area.center());
-    if(!screen)screen=QGuiApplication::primaryScreen();
-    m_glassBackdropGeometry=area;m_glassBackdropDpr=dpr;
-    cacheGlassBackdrop(WallpaperBackdrop::shared().sample(area,
-        screen?screen->geometry():area,dpr));
-    update();
-}
-
-void SmartSpaceWidget::cacheGlassBackdrop(const QImage &raw)
-{
-    m_glassBackdrop = {}; m_glassMaterial = {};
-    if (raw.isNull()) return;
-    if (m_glassOpticsEnabled) {
-        m_glassBackdrop = raw.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-        m_glassBackdrop.setDevicePixelRatio(devicePixelRatioF());
-        if (!m_standaloneGlassRenderer)
-            m_standaloneGlassRenderer = std::make_unique<FenceGlassRenderer>();
-        m_standaloneGlassRenderer->setWallpaper(m_glassBackdrop);
-    } else {
-        const QImage image = raw.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-        m_glassBackdrop = image.scaled(qMax(1, image.width() / 8), qMax(1, image.height() / 8),
-            Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
-            .scaled(image.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    }
 }
 
 QPoint SmartSpaceWidget::boundedPosition(const QPoint &position) const
@@ -2472,310 +2327,23 @@ QPoint SmartSpaceWidget::boundedPosition(const QPoint &position) const
     return QPoint(x, y);
 }
 
-void SmartSpaceWidget::hideToNearestEdge()
-{
-    if (m_fenceEmbedded || m_edgeHidden)
-        return;
-    QElapsedTimer preparation;
-    preparation.start();
-    // Login can retract before the canvas is mapped or pending layout events
-    // are delivered. Resolve both layout levels before reading the rail anchor;
-    // otherwise the first entry uses the hide button's construction geometry.
-    ensurePolished();
-    if (layout())
-        layout()->activate();
-    if (m_actionRail && m_actionRail->layout())
-        m_actionRail->layout()->activate();
-    // The initial reparent into a pinned window may also change its bounds.
-    // Apply the same snapping as revealFromEdge before capturing the anchor.
-    move(boundedPosition(pos()));
-    const QPoint railAnchorGlobal = m_closeButton
-        ? m_closeButton->mapToGlobal(m_closeButton->rect().center())
-        : mapToGlobal(rect().center());
-    m_expandedPosition = pos();
-    m_expandedSize = size();
-
-    QRect bounds;
-    if (isWindow()) {
-        QScreen *screen = QGuiApplication::screenAt(frameGeometry().center());
-        if (!screen)
-            screen = QGuiApplication::primaryScreen();
-        if (screen)
-            bounds = screen->availableGeometry();
-    } else if (parentWidget()) {
-        bounds = parentWidget()->rect();
-    }
-    if (!bounds.isValid())
-        return;
-
-    const QRect current(pos(), size());
-    const bool animate = isVisible() || m_edgeTransition;
-    const bool restoreVisibility = !isHidden() || m_edgeTransition;
-    LiquidPopup::hideText();
-    // Unmap before changing children, minimum size or geometry. A native
-    // child/compositor can expose those intermediate states even though the
-    // event handler has not returned yet. QWidget::grab can render offscreen.
-    hide();
-    hidePreview();
-    // Reversing an in-flight reveal keeps the exact frame and progress.
-    const auto *transition = static_cast<SmartRevealFrame *>(m_edgeTransition.data());
-    const QPixmap snapshot = transition ? transition->frame
-        : (animate ? grab() : QPixmap());
-    const int distances[] = {
-        qAbs(current.left() - bounds.left()),
-        qAbs(bounds.right() - current.right()),
-        qAbs(current.top() - bounds.top()),
-        qAbs(bounds.bottom() - current.bottom())
-    };
-    m_edgeSide = 0;
-    for (int side = 1; side < 4; ++side) {
-        if (distances[side] < distances[m_edgeSide])
-            m_edgeSide = side;
-    }
-
-    const QPoint railAnchor = isWindow() || !parentWidget()
-        ? railAnchorGlobal : parentWidget()->mapFromGlobal(railAnchorGlobal);
-
-    m_edgeHidden = true;
-    m_glassPointerActive = false;
-    if (m_glassPointerEffect) m_glassPointerEffect->setEnabled(false);
-    m_actionRail->hide();
-    m_contentContainer->hide();
-    m_edgeRevealButton->show();
-    m_edgeRevealButton->raise();
-    setAttribute(Qt::WA_OpaquePaintEvent, false);
-    setAttribute(Qt::WA_NoSystemBackground, true);
-    setAutoFillBackground(false);
-    clearMask();
-    setMinimumSize(1, 1);
-
-    resize(QSize(52, 52));
-    QPoint target;
-    if (m_edgeSide == 0) {
-        target = QPoint(bounds.left(),
-                        qBound(bounds.top(), railAnchor.y() - height() / 2,
-                               bounds.bottom() - height() + 1));
-    } else if (m_edgeSide == 1) {
-        target = QPoint(bounds.right() - width() + 1,
-                        qBound(bounds.top(), railAnchor.y() - height() / 2,
-                               bounds.bottom() - height() + 1));
-    } else if (m_edgeSide == 2) {
-        target = QPoint(qBound(bounds.left(), railAnchor.x() - width() / 2,
-                               bounds.right() - width() + 1), bounds.top());
-    } else {
-        target = QPoint(qBound(bounds.left(), railAnchor.x() - width() / 2,
-                               bounds.right() - width() + 1),
-                        bounds.bottom() - height() + 1);
-    }
-    move(target);
-    m_edgeRevealButton->setGeometry(rect());
-    updateRoundedMask();
-    m_geometrySaveTimer.start();
-    update();
-    if (!snapshot.isNull()) animateEdgeFrame(snapshot, current, false);
-    else if (restoreVisibility) show();
-    if (qEnvironmentVariableIsSet("UKUI_FENCES_ANIMATION_PROFILE"))
-        qInfo() << "[SmartTransition] retract preparation us:" << preparation.nsecsElapsed()/1000;
-}
-
-void SmartSpaceWidget::revealFromEdge()
-{
-    if (!m_edgeHidden)
-        return;
-    QElapsedTimer preparation;
-    preparation.start();
-    const bool animate = isVisible() || m_edgeTransition;
-    const bool restoreVisibility = !isHidden() || m_edgeTransition;
-    LiquidPopup::hideText();
-    // Keep the real surface unmapped throughout layout, material preparation
-    // and capture. It is shown only when the transition hands over its frame.
-    hide();
-    // Keep the hidden-state guard active while restoring child visibility and
-    // the minimum size.  Qt emits intermediate resize events here; allowing
-    // those events to persist geometry would replace the saved expanded size
-    // with the 620x360 minimum and move the widget to the star tab's edge.
-    const QSize restoredSize = m_expandedSize.expandedTo(QSize(620, 360));
-    const QPoint restoredPosition = m_expandedPosition;
-    m_edgeRevealButton->hide();
-    m_actionRail->show();
-    m_contentContainer->show();
-    const bool glassSurface = m_themeMode == 3;
-    setAttribute(Qt::WA_NoSystemBackground, glassSurface && isWindow());
-    setAttribute(Qt::WA_OpaquePaintEvent, !glassSurface);
-    setAutoFillBackground(!glassSurface);
-    setMinimumSize(620, 360);
-    resize(restoredSize);
-    move(boundedPosition(restoredPosition));
-    m_edgeHidden = false;
-    updateResponsiveLayout();
-    if (layout()) layout()->activate();
-    refreshGlassBackdrop();
-    if (m_glassPointerEffect)
-        m_glassPointerEffect->setEnabled(m_themeMode == 3 && !m_fenceEmbedded);
-    m_expandedSize = size();
-    m_expandedPosition = pos();
-    updateRoundedMask();
-    m_geometrySaveTimer.start();
-    update();
-    if (animate) animateEdgeReveal();
-    else if (restoreVisibility) show();
-    if (qEnvironmentVariableIsSet("UKUI_FENCES_ANIMATION_PROFILE"))
-        qInfo() << "[SmartTransition] reveal preparation us:" << preparation.nsecsElapsed()/1000;
-}
-
-void SmartSpaceWidget::finishEdgeTransition()
-{
-    if (!m_edgeTransition) return;
-    delete m_edgeTransition.data();
-    m_edgeTransition = nullptr;
-    m_edgeRevealButton->setGraphicsEffect(nullptr);
-    m_geometrySaveTimer.start();
-    show();
-    raise();
-    emit geometryChanged();
-}
-
-void SmartSpaceWidget::animateEdgeReveal()
-{
-    if (m_fenceEmbedded) return;
-    const auto *transition = static_cast<SmartRevealFrame *>(m_edgeTransition.data());
-    // Keep a value reference if a screen/geometry change retires the old frame.
-    const QPixmap snapshot = transition ? transition->frame : grab();
-    animateEdgeFrame(snapshot, geometry(), true);
-}
-
-void SmartSpaceWidget::animateEdgeFrame(const QPixmap &snapshot, const QRect &area, bool revealing)
-{
-    // Reuse a single frame and timeline when the user reverses direction.
-    // Layout changes once per interaction, never once per animation frame.
-    auto *overlay = static_cast<SmartRevealFrame *>(m_edgeTransition.data());
-    if (overlay && overlay->geometry() != area) {
-        finishEdgeTransition();
-        overlay = nullptr;
-    }
-    if (!overlay) {
-        const Qt::WindowFlags flags = isWindow()
-            ? Qt::Tool | Qt::FramelessWindowHint | Qt::BypassWindowManagerHint
-            : Qt::Widget;
-        overlay = new SmartRevealFrame(parentWidget(), flags);
-        overlay->setGeometry(area);
-        overlay->frame = snapshot;
-        if (!isWindow() && parentWidget()) {
-            // A translucent child makes Qt repaint the desktop and overlapping
-            // siblings on every tick. Freeze the uncovered background once,
-            // then repaint this opaque local surface only (no root screenshot).
-            hide();
-            overlay->background = parentWidget()->grab(area);
-            overlay->setAttribute(Qt::WA_OpaquePaintEvent, !overlay->background.isNull());
-        }
-        overlay->progress = revealing ? 0.0 : 1.0;
-        const QPoint offsets[] = {QPoint(-22,0), QPoint(22,0), QPoint(0,-22), QPoint(0,22)};
-        overlay->offset = offsets[qBound(0,m_edgeSide,3)];
-        m_edgeTransition = overlay;
-        auto *opacity = new QGraphicsOpacityEffect(m_edgeRevealButton);
-        m_edgeRevealButton->setGraphicsEffect(opacity);
-        auto *animation = new QVariantAnimation(overlay);
-        overlay->motion = animation;
-        animation->setEasingCurve(QEasingCurve::InOutCubic);
-        connect(animation, &QVariantAnimation::valueChanged, overlay,
-                [overlay, opacity](const QVariant &v) {
-            overlay->progress = v.toReal();
-            opacity->setOpacity(1.0 - overlay->progress);
-            overlay->update();
-        });
-        connect(animation, &QVariantAnimation::finished, this, [this, overlay] {
-            if (m_edgeTransition != overlay) return;
-            setProperty("edgePaintFrames", overlay->paintedFrames);
-            setProperty("edgeMaxPaintGapMs", overlay->maxPaintGapMs);
-            setProperty("edgeElapsedMs", overlay->paintClock.elapsed());
-            setProperty("edgeCachedBackground", !overlay->background.isNull());
-            if (qEnvironmentVariableIsSet("UKUI_FENCES_ANIMATION_PROFILE"))
-                qInfo() << "[SmartTransition] painted frames:" << overlay->paintedFrames
-                        << "max gap ms:" << overlay->maxPaintGapMs
-                        << "elapsed ms:" << overlay->paintClock.elapsed();
-            show(); raise();
-            m_edgeTransition = nullptr;
-            // Stop painting immediately; deferred deletion must not leave an
-            // old transparent frame above a newly started interaction.
-            overlay->hide();
-            overlay->deleteLater();
-            m_edgeRevealButton->setGraphicsEffect(nullptr);
-            m_geometrySaveTimer.start();
-            emit geometryChanged();
-        });
-    }
-    overlay->motion->stop();
-    m_geometrySaveTimer.stop();
-    const qreal startProgress = overlay->progress;
-    overlay->setObjectName(revealing ? "smartSpaceRevealFrame" : "smartSpaceRetractFrame");
-    const qreal target = revealing ? 1.0 : 0.0;
-    const qreal remaining = qAbs(target - startProgress);
-    {
-        // Setters recalculate currentValue even while stopped. Do not let
-        // those intermediate values overwrite the frame being reversed.
-        const QSignalBlocker blocker(overlay->motion);
-        overlay->motion->setDuration(LiquidPopup::Motion::duration(LiquidPopup::Motion::Normal, remaining));
-        overlay->motion->setStartValue(startProgress);
-        overlay->motion->setEndValue(target);
-        overlay->motion->setCurrentTime(0);
-    }
-    static_cast<QGraphicsOpacityEffect *>(m_edgeRevealButton->graphicsEffect())
-        ->setOpacity(1.0 - overlay->progress);
-    if (revealing) hide();
-    else show(); // The small entry keeps accepting clicks, even while fading in.
-    overlay->show(); overlay->raise();
-    if (!revealing) raise();
-    overlay->paintClock.restart();
-    overlay->paintedFrames = 0;
-    overlay->previousPaintMs = -1;
-    overlay->maxPaintGapMs = 0;
-    overlay->motion->start();
-}
-
 void SmartSpaceWidget::updateRoundedMask()
 {
-    if (m_edgeHidden && m_edgeRevealButton) {
-        // Rasterize the centred icon at device resolution, as the button does;
-        // QWidget::render() here would re-enter resize handling.
-        const qreal dpr = devicePixelRatioF();
-        QImage painted(QSize(qCeil(width()*dpr), qCeil(height()*dpr)), QImage::Format_ARGB32_Premultiplied);
-        painted.setDevicePixelRatio(dpr);
-        painted.fill(Qt::transparent);
-        {
-            QPainter iconPainter(&painted);
-            const QRect target(QPoint(), m_edgeRevealButton->iconSize());
-            m_edgeRevealButton->icon().paint(&iconPainter, target.translated(
-                m_edgeRevealButton->geometry().center() - target.center()));
-        }
-        VideoWallpaperRegion::publish(this, VideoWallpaperRegion::coverage(painted, dpr));
-    } else if (m_fenceEmbedded) {
+    if (m_fenceEmbedded) {
         VideoWallpaperRegion::publish(this,VideoWallpaperRegion::toDevice(QRegion(rect()),devicePixelRatioF()));
-    } else if (m_themeMode == 3) {
-        // Match the painted glass inset; a wider provisional cutout leaves a
-        // poster-coloured ring around the material.
-        if (!m_glassMaterial.isNull() && m_glassMaterialSize == size()
-            && qFuzzyCompare(m_glassMaterial.devicePixelRatioF(),devicePixelRatioF()))
-            VideoWallpaperRegion::publish(this, m_glassCoverage);
-        else
-            VideoWallpaperRegion::publish(this, VideoWallpaperRegion::rounded(
-                m_glassOpticsEnabled ? QRectF(rect()).adjusted(2,2,-2,-2) : QRectF(rect()).adjusted(5,5,-5,-5),
-                m_glassOpticsEnabled ? 10 : 19,devicePixelRatioF()));
     } else {
+        const qreal radius = isWindowMaximized() ? 0.0 : 12.0;
         VideoWallpaperRegion::publish(this, VideoWallpaperRegion::rounded(
-            QRectF(rect()).adjusted(1,1,-1,-1),16,devicePixelRatioF()));
+            QRectF(rect()), radius, devicePixelRatioF()));
     }
-    if (m_edgeHidden || m_fenceEmbedded || isWindow() || m_themeMode == 3) {
-        // Top-level pinned mode uses an ARGB backing surface.  Keeping the
-        // integer QRegion here would discard antialiased edge alpha. Glass
-        // mode instead keeps its content inside the rounded material inset.
+    if (m_fenceEmbedded || isWindow()) {
+        // Top-level windows use an ARGB backing surface.  Keeping the
+        // integer QRegion here would discard antialiased edge alpha.
         clearMask();
         return;
     }
     QPainterPath path;
-    if (m_themeMode == 3)
-        path.addRoundedRect(QRectF(rect()).adjusted(5, 5, -5, -5), 19, 19);
-    else
-        path.addRoundedRect(rect(), 16, 16);
+    path.addRoundedRect(rect(), 12, 12);
     setMask(QRegion(path.toFillPolygon().toPolygon()));
 }
 
@@ -3421,7 +2989,7 @@ void SmartSpaceWidget::handleIndexerOutput()
                     .arg(currentPath.isEmpty() ? QString()
                         : QStringLiteral("\n当前文件：%1").arg(currentPath)));
                 if (m_indexProgress->underMouse()) {
-                    LiquidPopup::showText(
+                    QToolTip::showText(
                         m_indexProgress->mapToGlobal(
                             QPoint(m_indexProgress->width() / 2,
                                    m_indexProgress->height() + 4)),
@@ -4259,7 +3827,7 @@ void SmartSpaceWidget::showResultSortMenu()
             updateResults(false);
         });
     }
-    LiquidPopup::execAt(menu,m_sortButton);
+    execMenuAt(menu, m_sortButton);
 }
 
 QVector<int> SmartSpaceWidget::matchingFileIndexes() const
@@ -4500,7 +4068,7 @@ void SmartSpaceWidget::showPreviewForPath(const QString &path)
     const SmartSpaceEntry *entry = entryForPath(path);
     if (!entry || entry->isDir || !m_previewPanel)
         return;
-    LiquidPopup::hideText();
+    QToolTip::hideText();
     if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
         m_previewProcess->kill();
         m_previewProcess->waitForFinished(120);
@@ -4566,8 +4134,7 @@ void SmartSpaceWidget::hidePreview()
         m_previewImage->setMinimumSize(QSize(0, 0));
     if (m_previewPanel)
         m_previewPanel->hide();
-    if (m_resultStack)
-        m_resultStack->setCurrentWidget(m_resultPage);
+    updateResponsiveLayout();
 }
 
 void SmartSpaceWidget::showPreviewImage(const QString &imagePath)
@@ -5015,7 +4582,7 @@ void SmartSpaceWidget::openPath(const QString &path)
         return;
     entry.openAsync(this, [this](bool ok, const QString &error) {
         if (!ok)
-            LiquidDialog::warning(this, "无法打开项目", error);
+            smartWarning(this, QStringLiteral("无法打开项目"), error);
     });
 }
 
@@ -5064,62 +4631,102 @@ void SmartSpaceWidget::showEntryMenu(QListWidget *list, const QPoint &position)
 
 void SmartSpaceWidget::showSettingsDialog()
 {
-    LiquidDialog::Dialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("AI空间设置"));
-    auto *layout = new QVBoxLayout(&dialog);
-    layout->addWidget(createSettingsPage(&dialog));
-    dialog.exec();
+    setSettingsViewVisible(true);
 }
 
 QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
 {
     auto *form = new QWidget(parent);
+    form->setObjectName(QStringLiteral("smartSettingsPage"));
     QWidget &dialog = *form;
     connect(this, &QObject::destroyed, form, &QObject::deleteLater);
     dialog.setWindowTitle(QStringLiteral("AI空间设置"));
-    dialog.resize(760, 700);
-    dialog.setMinimumSize(600, 540);
-    dialog.setPalette(palette());
     QColor buttonHover = m_accentColor;
-    buttonHover.setAlpha(55);
-    dialog.setStyleSheet(styleSheet() + QStringLiteral(R"(
-        QDialog { background: %1; color: %2; }
-        QLabel[settingsSubtitle="true"] { color: %4; font-size: 12px; }
-        QLabel[settingsHint="true"] { color: %4; background: %6;
-                                      border: 1px solid %3; border-radius: 8px;
-                                      padding: 9px 11px; }
-        QTabWidget::pane { background: %6; border: 1px solid %3;
-                           border-radius: 10px; top: -1px; }
-        QTabBar::tab { color: %4; padding: 9px 15px; margin-right: 2px;
-                       border-radius: 7px; }
-        QTabBar::tab:hover { color: %2; background: %6; }
-        QTabBar::tab:selected { color: %2; background: %5; font-weight: 600; }
+    buttonHover.setAlpha(28);
+    QColor accentSoft = m_accentColor;
+    accentSoft.setAlpha(m_themeMode == 2 ? 26 : 48);
+    const QColor field = m_themeMode == 2 ? QColor(255,255,255,58) : QColor(15,23,42,58);
+    dialog.setStyleSheet(QStringLiteral(R"(
+        QWidget#smartSettingsPage { background: transparent; color: %1; }
+        QLabel#settingsPageTitle { color: %1; font-size: 18px; font-weight: 700; }
+        QLabel[settingsSubtitle="true"] { color: %3; font-size: 12px; }
+        QLabel[settingsHint="true"] { color: %3; background: %8;
+                                      border: 1px solid %2; border-radius: 10px;
+                                      padding: 10px 12px; }
+        QTabWidget::pane { background: %5; border: 1px solid %2;
+                           border-radius: 14px; top: 10px; }
+        QTabWidget::tab-bar { left: 0px; }
+        QTabBar { background: transparent; }
+        QTabBar::tab { color: %3; background: transparent; padding: 7px 16px;
+                       margin-right: 6px; border: 1px solid transparent;
+                       border-radius: 16px; font-weight: 500; }
+        QTabBar::tab:hover { color: %1; background: %4; }
+        QTabBar::tab:selected { color: %6; background: %7; border-color: %7;
+                                font-weight: 600; }
         QScrollArea#settingsPageScroll, QWidget#settingsPage {
             background: transparent; border: none;
         }
-        QLabel[settingsSectionTitle="true"] { color: %2; font-weight: 600; }
-        QListWidget { background: %6; border: 1px solid %3; border-radius: 8px; }
-        QPushButton { color: %2; background: %6; border: 1px solid %3;
-                      border-radius: 8px; padding: 8px 15px; }
+        QLabel[settingsSectionTitle="true"] { color: %1; font-size: 14px; font-weight: 600; }
+        QListWidget { background: %8; border: 1px solid %2; border-radius: 10px;
+                      padding: 4px; }
+        QPushButton { color: %1; background: %5; border: 1px solid %2;
+                      border-radius: 9px; padding: 7px 15px; }
         QPushButton[settingsGroupAction="true"] {
-            padding: 5px 12px; min-height: 22px;
+            padding: 4px 12px; min-height: 22px;
         }
-        QPushButton:hover { background: %5; }
-        QPushButton#primarySettingsButton { color: white; background: %7;
-                                            border-color: %7; font-weight: 600; }
-        QCheckBox, QLabel { color: %2; }
-    )").arg(cssColor(m_themeMode == 3 ? QColor(28, 33, 42) : m_surfaceColor), cssColor(m_textColor),
+        QPushButton:hover { background: %4; border-color: %6; }
+        QPushButton#primarySettingsButton { color: white; background: %6;
+                                            border-color: %6; font-weight: 600;
+                                            padding: 8px 20px; }
+        QPushButton#primarySettingsButton:hover { background: %9; border-color: %9; }
+        QPushButton#settingsBackButton { padding: 8px 16px; }
+        QCheckBox, QLabel { color: %1; }
+        QCheckBox { spacing: 8px; }
+        QLineEdit, QComboBox, QSpinBox, QPlainTextEdit { background: %8; }
+        QToolButton[themeCard="true"] {
+            color: %1; background: %8; border: 2px solid %2; border-radius: 14px;
+            padding: 10px; font-weight: 600;
+        }
+        QToolButton[themeCard="true"]:hover { border-color: %6; }
+        QToolButton[themeCard="true"]:checked { border-color: %6; background: %7; }
+    )").arg(cssColor(m_textColor),
              cssColor(m_borderColor), cssColor(m_mutedColor),
              cssColor(buttonHover), cssColor(m_cardColor),
-             cssColor(m_accentColor)));
+             cssColor(m_accentColor), cssColor(accentSoft), cssColor(field))
+        .arg(cssColor(m_accentColor.darker(112))));
     auto *layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(18, 15, 18, 15);
-    layout->setSpacing(11);
+    layout->setContentsMargins(22, 16, 22, 16);
+    layout->setSpacing(10);
+    auto *pageHeader = new QHBoxLayout;
+    pageHeader->setSpacing(10);
+    auto *titleColumn = new QVBoxLayout;
+    titleColumn->setSpacing(2);
+    auto *pageTitle = new QLabel(QStringLiteral("偏好设置"), &dialog);
+    pageTitle->setObjectName(QStringLiteral("settingsPageTitle"));
+    titleColumn->addWidget(pageTitle);
     auto *settingsSubtitle = new QLabel(QStringLiteral(
         "索引范围、更新策略、外观和本地 Skill 配置均保存在本机"), &dialog);
     settingsSubtitle->setProperty("settingsSubtitle", true);
-    layout->addWidget(settingsSubtitle);
+    titleColumn->addWidget(settingsSubtitle);
+    pageHeader->addLayout(titleColumn, 1);
+    auto *backButton = new QPushButton(QStringLiteral("返回检索"), &dialog);
+    backButton->setObjectName(QStringLiteral("settingsBackButton"));
+    backButton->setCursor(Qt::PointingHandCursor);
+    auto *saveButton = new QPushButton(QStringLiteral("保存设置"), &dialog);
+    saveButton->setObjectName(QStringLiteral("primarySettingsButton"));
+    saveButton->setCursor(Qt::PointingHandCursor);
+    saveButton->setMinimumWidth(104);
+    pageHeader->addWidget(backButton, 0, Qt::AlignVCenter);
+    pageHeader->addWidget(saveButton, 0, Qt::AlignVCenter);
+    layout->addLayout(pageHeader);
+    connect(backButton, &QPushButton::clicked, this, [this] {
+        QTimer::singleShot(0, this, [this] { setSettingsViewVisible(false); });
+    });
     auto *tabs = new QTabWidget(&dialog);
+    tabs->setDocumentMode(false);
+    tabs->tabBar()->setDrawBase(false);
+    tabs->tabBar()->setExpanding(false);
+    tabs->tabBar()->setCursor(Qt::PointingHandCursor);
     layout->addWidget(tabs, 1);
 
     auto *indexTab = new QScrollArea(tabs);
@@ -5337,12 +4944,6 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     auto *autoStart = new QCheckBox(QStringLiteral("登录后启动AI空间"),updateTab);
     autoStart->setChecked(m_autoStart);
     updateLayout->addWidget(autoStart);
-    auto *defaultHidden = new QCheckBox(
-        QStringLiteral("启动或启用组件后默认贴边隐藏"), updateTab);
-    defaultHidden->setChecked(m_defaultHidden);
-    defaultHidden->setToolTip(QStringLiteral(
-        "打开组件后点击边缘图标即可展开；关闭后恢复上次展开状态"));
-    updateLayout->addWidget(defaultHidden);
     auto *syncKylin = new QCheckBox(
         QStringLiteral("同步目录到麒麟文件索引服务（如果已安装）"), updateTab);
     syncKylin->setChecked(true);
@@ -5382,34 +4983,92 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     auto *appearanceLayout = new QVBoxLayout(appearanceTab);
     appearanceLayout->setContentsMargins(18, 18, 18, 18);
     appearanceLayout->setSpacing(12);
-    auto *appearanceTitle = new QLabel(QStringLiteral("AI空间皮肤"),
+    auto *appearanceTitle = new QLabel(QStringLiteral("界面主题"),
                                        appearanceTab);
     appearanceTitle->setProperty("settingsSectionTitle", true);
     appearanceLayout->addWidget(appearanceTitle);
     auto *appearanceHint = new QLabel(QStringLiteral(
-        "选择AI空间的整体视觉风格。液态玻璃会抓取桌面内容作为柔化背景，"
-        "并应用半透明面板、边缘高光和玻璃按钮。"), appearanceTab);
-    appearanceHint->setProperty("settingsHint", true);
+        "选择AI空间的整体视觉风格。两种主题都使用纯色界面，清晰稳定、不额外占用 GPU。"),
+        appearanceTab);
+    appearanceHint->setProperty("settingsSubtitle", true);
     appearanceHint->setWordWrap(true);
     appearanceLayout->addWidget(appearanceHint);
-    auto *themeMode = new QComboBox(&dialog);
-    themeMode->addItem(QStringLiteral("黑夜模式"), 1);
-    themeMode->addItem(QStringLiteral("白天模式"), 2);
-    themeMode->addItem(QStringLiteral("液态玻璃"), 3);
-    themeMode->setCurrentIndex(themeMode->findData(m_themeMode));
-    themeMode->setMinimumWidth(220);
-    appearanceLayout->addWidget(themeMode);
-    auto *glassOptics=new QComboBox(appearanceTab);
-    glassOptics->setObjectName(QStringLiteral("smartGlassOpticsChoice"));
-    glassOptics->addItem(QStringLiteral("轻量柔光（原样式）"),false);
-    glassOptics->addItem(QStringLiteral("分区同款玻璃（预览）"),true);
-    glassOptics->setCurrentIndex(m_glassOpticsEnabled?1:0);
-    appearanceLayout->addWidget(new QLabel(QStringLiteral("液态玻璃质感"),appearanceTab));
-    appearanceLayout->addWidget(glassOptics);
+    // Hidden combo keeps the save logic simple; the cards drive it.
+    auto *themeMode = new QComboBox(appearanceTab);
+    themeMode->addItem(QStringLiteral("浅色雅致"), 2);
+    themeMode->addItem(QStringLiteral("深邃暗夜"), 1);
+    themeMode->setCurrentIndex(qMax(0, themeMode->findData(m_themeMode == 2 ? 2 : 1)));
+    themeMode->hide();
+    auto *themeCards = new QHBoxLayout;
+    themeCards->setSpacing(14);
+    auto *themeGroup = new QButtonGroup(appearanceTab);
+    themeGroup->setExclusive(true);
+    auto makeThemeCard = [&](int mode, const QString &title,
+                             const QColor &canvas, const QColor &card,
+                             const QColor &accent, const QColor &ink) {
+        const QSize previewSize(168, 96);
+        const qreal dpr = devicePixelRatioF();
+        QPixmap preview(previewSize * dpr);
+        preview.setDevicePixelRatio(dpr);
+        preview.fill(Qt::transparent);
+        {
+            QPainter p(&preview);
+            p.setRenderHint(QPainter::Antialiasing);
+            QPainterPath frame;
+            frame.addRoundedRect(QRectF(0.5, 0.5, 167, 95), 9, 9);
+            p.fillPath(frame, canvas);
+            p.save();
+            p.setClipPath(frame);
+            p.fillRect(QRectF(0, 0, 168, 18), card);
+            p.restore();
+            p.setPen(Qt::NoPen);
+            p.setBrush(accent);
+            p.drawRoundedRect(QRectF(8, 5, 8, 8), 2.5, 2.5);
+            QColor muted = ink; muted.setAlpha(90);
+            p.setBrush(muted);
+            p.drawRoundedRect(QRectF(20, 7, 34, 4), 2, 2);
+            p.setBrush(card);
+            p.drawRoundedRect(QRectF(8, 26, 48, 62), 6, 6);
+            p.drawRoundedRect(QRectF(62, 26, 98, 62), 6, 6);
+            p.setBrush(accent);
+            p.drawRoundedRect(QRectF(70, 34, 56, 6), 3, 3);
+            p.setBrush(muted);
+            for (int i = 0; i < 3; ++i) {
+                p.drawRoundedRect(QRectF(70, 48 + i * 12, 80 - i * 14, 5), 2.5, 2.5);
+                p.drawRoundedRect(QRectF(14, 34 + i * 12, 34, 5), 2.5, 2.5);
+            }
+            p.setPen(QPen(QColor(0, 0, 0, 30), 1));
+            p.setBrush(Qt::NoBrush);
+            p.drawPath(frame);
+        }
+        auto *button = new QToolButton(appearanceTab);
+        button->setProperty("themeCard", true);
+        button->setCheckable(true);
+        button->setChecked((m_themeMode == 2 ? 2 : 1) == mode);
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        button->setIcon(QIcon(preview));
+        button->setIconSize(previewSize);
+        button->setText(title);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setMinimumSize(200, 150);
+        themeGroup->addButton(button, mode);
+        themeCards->addWidget(button);
+        connect(button, &QToolButton::clicked, themeMode, [themeMode, mode] {
+            themeMode->setCurrentIndex(themeMode->findData(mode));
+        });
+    };
+    makeThemeCard(2, QStringLiteral("浅色雅致"),
+                  QColor(QStringLiteral("#f4f6fa")), QColor(QStringLiteral("#ffffff")),
+                  QColor(QStringLiteral("#2563eb")), QColor(QStringLiteral("#0f172a")));
+    makeThemeCard(1, QStringLiteral("深邃暗夜"),
+                  QColor(QStringLiteral("#0b1120")), QColor(QStringLiteral("#131c31")),
+                  QColor(QStringLiteral("#3b82f6")), QColor(QStringLiteral("#f1f5f9")));
+    themeCards->addStretch(1);
+    appearanceLayout->addLayout(themeCards);
     auto *appearanceDetail = new QLabel(QStringLiteral(
-        "黑夜模式和白天模式使用纯色界面；液态玻璃适合叠加在桌面壁纸上。"
-        "设置保存后，下次打开AI空间会继续使用当前皮肤。"), appearanceTab);
-    appearanceDetail->setProperty("settingsSubtitle", true);
+        "提示：标题栏上的太阳/月亮按钮可随时一键切换主题；保存设置后下次启动沿用当前主题。"),
+        appearanceTab);
+    appearanceDetail->setProperty("settingsHint", true);
     appearanceDetail->setWordWrap(true);
     appearanceLayout->addWidget(appearanceDetail);
     appearanceLayout->addStretch(1);
@@ -5430,7 +5089,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     knowledgeLayout->addLayout(knowledgePathRow);
     connect(browseKnowledge, &QPushButton::clicked, &dialog,
             [&dialog, knowledgePathEdit] {
-        const QString path = LiquidDialog::getExistingDirectory(
+        const QString path = QFileDialog::getExistingDirectory(
             dialog.window(), QStringLiteral("选择知识库保存位置"),
             knowledgePathEdit->text());
         if (!path.isEmpty())
@@ -5528,7 +5187,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
             skillStatus->setText(QStringLiteral("Skill 目录不存在，无法导出。"));
             return;
         }
-        const QString destination = LiquidDialog::getExistingDirectory(
+        const QString destination = QFileDialog::getExistingDirectory(
             dialog.window(), QStringLiteral("选择 Skill 导出目录"));
         if (destination.isEmpty())
             return;
@@ -5579,25 +5238,8 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     providerLayout->addStretch(1);
     tabs->addTab(providerTab, QStringLiteral("数据源"));
 
-    auto *buttons = new QDialogButtonBox(
-        QDialogButtonBox::Apply, &dialog);
-    if (auto *ok = buttons->button(QDialogButtonBox::Apply)) {
-        ok->setText(QStringLiteral("保存设置"));
-        ok->setIcon(QIcon());
-        ok->setObjectName(QStringLiteral("primarySettingsButton"));
-        ok->setMinimumWidth(104);
-        ok->setStyleSheet(QStringLiteral(
-            "QPushButton { color: white; background: %1; border: 1px solid %1; "
-            "border-radius: 8px; padding: 8px 16px; font-weight: 600; }")
-            .arg(cssColor(m_accentColor)));
-    }
-    if (auto *cancel = buttons->button(QDialogButtonBox::Cancel)) {
-        cancel->setText(QStringLiteral("取消"));
-        cancel->setIcon(QIcon());
-    }
-    layout->addWidget(buttons);
     connect(addRoot, &QPushButton::clicked, &dialog, [&dialog, rootList] {
-        const QString path = LiquidDialog::getExistingDirectory(
+        const QString path = QFileDialog::getExistingDirectory(
             dialog.window(), QStringLiteral("选择索引目录"));
         if (!path.isEmpty()) {
             const QList<QListWidgetItem *> found = rootList->findItems(path, Qt::MatchExactly);
@@ -5610,7 +5252,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     });
     connect(addExclude, &QPushButton::clicked, &dialog,
             [&dialog, rootList, excludeList] {
-        const QString path = LiquidDialog::getExistingDirectory(
+        const QString path = QFileDialog::getExistingDirectory(
             dialog.window(), QStringLiteral("选择要排除的文件夹"));
         if (path.isEmpty())
             return;
@@ -5681,7 +5323,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
                 indexFormatList->item(row)->checkState());
     });
     connect(browseProvider, &QPushButton::clicked, &dialog, [&dialog, providerEdit] {
-        const QString path = LiquidDialog::getOpenFileName(
+        const QString path = QFileDialog::getOpenFileName(
             dialog.window(), QStringLiteral("选择 Provider 配置"),
             QFileInfo(providerEdit->text()).absolutePath(), QStringLiteral("JSON (*.json)"));
         if (!path.isEmpty()) providerEdit->setText(path);
@@ -5722,7 +5364,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
   ]
 })");
         }
-        LiquidDialog::Dialog editor(&dialog);
+        QDialog editor(&dialog);
         editor.setWindowTitle(QStringLiteral("Provider JSON 配置"));
         editor.resize(720, 540);
         auto *editorLayout = new QVBoxLayout(&editor);
@@ -5757,7 +5399,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
         editor.exec();
     });
 
-    connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, &dialog, [=, &dialog] {
+    connect(saveButton, &QPushButton::clicked, &dialog, [=, &dialog] {
     QStringList roots;
     for (int i = 0; i < rootList->count(); ++i) {
         const QString path = rootList->item(i)->text();
@@ -5829,7 +5471,6 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     const bool excludeChanged = excludedFolders != m_excludedFolders;
     const bool hiddenChanged = hiddenFolders != m_hiddenFolders;
     const bool visibleFormatsChanged = visibleExtensions != m_visibleExtensions;
-    const bool previousDefaultHidden = m_defaultHidden;
     const bool indexInputsChanged = roots != m_roots ||
         excludeChanged || indexedExtensions != m_indexedExtensions ||
         ocr->isChecked() != m_ocrImages ||
@@ -5845,10 +5486,9 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     m_indexMode = indexMode->currentData().toInt();
     m_indexIntervalMinutes = interval->value();
     m_themeMode = themeMode->currentData().toInt();
-    setGlassOpticsEnabled(glassOptics->currentData().toBool(),false);
+
     m_customOpacity = 100;
     m_customColorsEnabled = false;
-    m_defaultHidden = defaultHidden->isChecked();
     setAutoStart(autoStart->isChecked());
     m_knowledgeDirectory = QDir::cleanPath(
         knowledgePathEdit->text().trimmed());
@@ -5874,12 +5514,6 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     configureIndexScheduling();
     applyTheme();
     saveSettings();
-    if (m_defaultHidden && !previousDefaultHidden && !m_edgeHidden &&
-        !m_fenceEmbedded) {
-        QTimer::singleShot(0, this, &SmartSpaceWidget::hideToNearestEdge);
-    } else if (!m_defaultHidden && previousDefaultHidden && m_edgeHidden) {
-        revealFromEdge();
-    }
     if (syncKylin->isChecked()) {
         QDBusInterface indexService(
             QStringLiteral("com.ukui.search.fileindex.service"),
@@ -5905,7 +5539,9 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     indexNow->setChecked(false);
     buildKnowledgeNow->setChecked(false);
     dialog.setProperty("settingsDirty", false);
+    QTimer::singleShot(0, this, [this] { setSettingsViewVisible(false); });
     });
+    styleModernCombos(form);
     return form;
 }
 
@@ -5917,174 +5553,11 @@ void SmartSpaceWidget::setEditMode(bool edit)
     update();
 }
 
-QRegion SmartSpaceWidget::glassPointerDamage(const QPoint &position) const
-{
-    const QRectF material = m_glassOpticsEnabled ? QRectF(rect()).adjusted(2,2,-2,-2) : QRectF(rect()).adjusted(5,5,-5,-5);
-    const int radius = m_glassOpticsEnabled ? 10 : 19;
-    const QPointF pointer(position);
-    const QPointF candidates[] = {
-        QPointF(qBound(material.left()+radius,pointer.x(),material.right()-radius),material.top()),
-        QPointF(qBound(material.left()+radius,pointer.x(),material.right()-radius),material.bottom()),
-        QPointF(material.left(),qBound(material.top()+radius,pointer.y(),material.bottom()-radius)),
-        QPointF(material.right(),qBound(material.top()+radius,pointer.y(),material.bottom()-radius))
-    };
-    qreal distance = std::numeric_limits<qreal>::max();
-    for (const auto &candidate : candidates) {
-        const auto delta = pointer-candidate;
-        const qreal d = QPointF::dotProduct(delta,delta);
-        distance = qMin(distance, d);
-    }
-    if (distance >= 52.0*52.0) return {};
-    QPainterPath rim;
-    if (m_glassOpticsEnabled) rim = GlassFinish::squirclePath(material.adjusted(1.5,1.5,-1.5,-1.5), 8.5);
-    else rim.addRoundedRect(material, 19, 19);
-    return pointerRimDamage(rim, pointer, 112);
-}
-
-const QImage &SmartSpaceWidget::glassMaterial()
-{
-    const qreal dpr = devicePixelRatioF();
-    if (m_glassOpticsEnabled && m_glassBackdropRefreshTimer.isActive() && !m_glassMaterial.isNull())
-        return m_glassMaterial;
-    if (!m_glassMaterial.isNull() && m_glassMaterialSize == size()
-        && qFuzzyCompare(m_glassMaterial.devicePixelRatioF(), dpr))
-        return m_glassMaterial;
-
-    auto publish = [this, dpr] {
-        setProperty("smartGlassMaterialBuilds",property("smartGlassMaterialBuilds").toInt()+1);
-        m_glassCoverage = VideoWallpaperRegion::coverage(m_glassMaterial, dpr);
-        VideoWallpaperRegion::publish(this, m_glassCoverage);
-    };
-    if (m_glassOpticsEnabled) {
-        QElapsedTimer timer; timer.start();
-        QImage panel;
-        bool gpu = false;
-        // Leave a transparent safety gutter inside the QWidget. Qt/X11 can
-        // fail to restore an antialiased pixel exactly on a child boundary
-        // during partial paints. The gutter has no dark border or shadow.
-        const QSize panelSize = size()-QSize(4,4);
-        if (m_standaloneGlassRenderer) {
-            panel=m_standaloneGlassRenderer->renderPanel(QRect(QPoint(2,2),panelSize),10.0);
-            gpu=m_standaloneGlassRenderer->usedGpu();
-        }
-        // A canvas preparation in flight will emit liquidGlassReady(). Keep
-        // this cache invalid rather than freezing a dark substitute panel.
-        if (panel.isNull()) return m_glassMaterial;
-        const QSize pixels(qMax(1,qRound(panelSize.width()*dpr)), qMax(1,qRound(panelSize.height()*dpr)));
-        if (panel.size()!=pixels) panel=panel.scaled(pixels, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        panel.setDevicePixelRatio(dpr);
-        // Same order and parameters as FenceWidget::prepareGlassCache(). No
-        // custom trough, black frame or second readability veil on top.
-        const QImage finished = GlassFinish::withEdge(GlassFinish::withGrain(GlassFinish::withScrim(
-            panel, GlassFinish::scrim())), GlassFinish::squirclePath(QRectF(QPointF(),QSizeF(panelSize)),10));
-        m_glassMaterial = QImage(QSize(qRound(width()*dpr),qRound(height()*dpr)),QImage::Format_ARGB32_Premultiplied);
-        m_glassMaterial.setDevicePixelRatio(dpr);m_glassMaterial.fill(Qt::transparent);
-        { QPainter compose(&m_glassMaterial);compose.drawImage(QPointF(2,2),finished); }
-        m_glassMaterialSize = size();
-        setProperty("smartGlassMaterialBackend", "ai-space-local");
-        setProperty("smartGlassUsedGpu", gpu);
-        publish();
-        qInfo().noquote()<<QStringLiteral("[glass] smart-space %1x%2 %3 %4 rebuilt in %5 ms")
-            .arg(width()).arg(height()).arg(QStringLiteral("standalone"))
-            .arg(gpu?QStringLiteral("GPU"):QStringLiteral("CPU fallback")).arg(timer.elapsed());
-        return m_glassMaterial;
-    }
-
-    // Compose the stationary wallpaper, veil, gradients and rim once. Pointer
-    // motion only restores its small damaged region from this material image.
-    m_glassMaterialSize = size();
-    m_glassMaterial = QImage(QSize(qCeil(width() * dpr), qCeil(height() * dpr)),
-                             QImage::Format_ARGB32_Premultiplied);
-    m_glassMaterial.setDevicePixelRatio(dpr);
-    m_glassMaterial.fill(Qt::transparent);
-    QPainter painter(&m_glassMaterial);
-    painter.setRenderHint(QPainter::Antialiasing);
-    const QRectF materialRect = QRectF(rect()).adjusted(5, 5, -5, -5);
-    QPainterPath path;
-    path.addRoundedRect(materialRect, 19, 19);
-    painter.save();
-    painter.setClipPath(path);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    if (!m_glassBackdrop.isNull()) painter.drawImage(rect(), m_glassBackdrop);
-    painter.fillPath(path, QColor(8, 13, 21, 112));
-    QLinearGradient tint(materialRect.topLeft(), materialRect.bottomRight());
-    tint.setColorAt(0.0, QColor(255, 255, 255, 24));
-    tint.setColorAt(0.28, QColor(255, 255, 255, 6));
-    tint.setColorAt(0.68, QColor(5, 9, 15, 34));
-    tint.setColorAt(1.0, QColor(3, 6, 11, 68));
-    painter.fillPath(path, tint);
-    QRadialGradient glow(QPointF(width() * 0.22, height() * 0.04),
-                         qMax(width(), height()) * 0.78);
-    glow.setColorAt(0.0, QColor(255, 255, 255, 30));
-    glow.setColorAt(0.34, QColor(214, 239, 255, 10));
-    glow.setColorAt(1.0, QColor(214, 239, 255, 0));
-    painter.fillPath(path, glow);
-    painter.restore();
-    QPainterPath rim;
-    rim.setFillRule(Qt::OddEvenFill);
-    rim.addRoundedRect(materialRect, 19, 19);
-    rim.addRoundedRect(materialRect.adjusted(1.1, 1.1, -1.1, -1.1), 17.9, 17.9);
-    painter.fillPath(rim, QColor(245, 250, 255, 50));
-    QPainterPath topHighlight;
-    topHighlight.moveTo(30, 5.5);
-    topHighlight.cubicTo(width() * 0.30, 3.7, width() * 0.68, 3.7, width() - 30, 5.5);
-    painter.setPen(QPen(QColor(255, 255, 255, 48), 0.9, Qt::SolidLine, Qt::RoundCap));
-    painter.drawPath(topHighlight);
-    painter.end();
-    m_glassMaterial = GlassFinish::withGrain(GlassFinish::withScrim(m_glassMaterial, GlassFinish::scrim()));
-    setProperty("smartGlassMaterialBackend", "legacy");
-    setProperty("smartGlassUsedGpu", false);
-    publish();
-    return m_glassMaterial;
-}
-
 void SmartSpaceWidget::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
     painter.setClipRegion(event->region());
     painter.setRenderHint(QPainter::Antialiasing);
-    if (m_edgeHidden) {
-        if (isWindow()) {
-            painter.setCompositionMode(QPainter::CompositionMode_Source);
-            painter.fillRect(rect(), Qt::transparent);
-        }
-        return;
-    }
-    if (m_themeMode == 3 && !m_fenceEmbedded) {
-        if (isWindow()) {
-            painter.setCompositionMode(QPainter::CompositionMode_Source);
-            painter.fillRect(rect(), Qt::transparent);
-            painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        }
-        const QImage &material = glassMaterial();
-        if (m_glassMaterialSize == size()) painter.drawImage(QPoint(0, 0), material);
-        else painter.drawImage(rect(), material); // temporary resize stretch
-
-        if (m_glassPointerActive && !glassPointerDamage(m_glassPointerPosition).isEmpty()) {
-            QPainterPath rim;
-            // Keep moving light inside opaque material. Painting on the
-            // translucent outermost pixel can accumulate a trail on X11.
-            if (m_glassOpticsEnabled) rim = GlassFinish::squirclePath(QRectF(rect()).adjusted(3.5,3.5,-3.5,-3.5),8.5);
-            else rim.addRoundedRect(QRectF(rect()).adjusted(5, 5, -5, -5), 19, 19);
-            // Match the monitor's restrained reflection: a fine rim and faint
-            // inner glow, without a separate curved caustic or wide light band.
-            QRadialGradient reflection(m_glassPointerPosition, 112);
-            reflection.setColorAt(0, QColor(233, 247, 255, 135));
-            reflection.setColorAt(0.38, QColor(193, 225, 255, 48));
-            reflection.setColorAt(1, Qt::transparent);
-            painter.save();
-            painter.setClipPath(rim, Qt::IntersectClip);
-            painter.setBrush(Qt::NoBrush);
-            painter.setPen(QPen(QBrush(reflection), 1.6));
-            painter.drawPath(rim);
-            reflection.setColorAt(0, QColor(208, 234, 255, 22));
-            reflection.setColorAt(0.45, QColor(193, 225, 255, 8));
-            painter.setPen(QPen(QBrush(reflection), 8));
-            painter.drawPath(rim);
-            painter.restore();
-        }
-        return;
-    }
     if (m_fenceEmbedded) {
         painter.fillRect(rect(), m_surfaceColor);
         return;
@@ -6094,29 +5567,21 @@ void SmartSpaceWidget::paintEvent(QPaintEvent *event)
         painter.fillRect(rect(), Qt::transparent);
         painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
     }
-    QPainterPath path;
-    const int radius = m_edgeHidden ? 13 : 16;
-    path.addRoundedRect(rect().adjusted(1, 1, -1, -1), radius, radius);
-    QLinearGradient glass(rect().topLeft(), rect().bottomRight());
-    QColor highlight = m_surfaceColor.lighter(112);
-    highlight.setAlpha(m_surfaceColor.alpha());
-    glass.setColorAt(0.0, highlight);
-    glass.setColorAt(0.42, m_surfaceColor);
-    glass.setColorAt(1.0, m_surfaceColor.darker(108));
-    painter.fillPath(path, glass);
-    QColor outline = m_accentColor;
-    outline.setAlpha(m_editMode ? 210 : 100);
-    painter.setPen(QPen(outline,
-                        m_editMode ? 2 : 1));
-    painter.drawPath(path);
+    const bool maxed = isWindowMaximized();
+    const qreal radius = maxed ? 0.0 : AiSpace::WindowMetrics::CornerRadius;
+    QPainterPath path;path.addRoundedRect(QRectF(rect()).adjusted(.5,.5,-.5,-.5),radius,radius);
+    painter.fillPath(path,m_surfaceColor);
+    if (!maxed) {
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(m_borderColor,1));
+        painter.drawPath(path);
+    }
+
 }
 
 void SmartSpaceWidget::moveEvent(QMoveEvent *event)
 {
     QWidget::moveEvent(event);
-    if (!m_edgeHidden)
-        m_expandedPosition = pos();
-    scheduleGlassBackdropRefresh();
     emit geometryChanged();
 }
 
@@ -6124,28 +5589,20 @@ void SmartSpaceWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     updateRoundedMask();
-    if (m_edgeHidden) {
-        if (m_edgeRevealButton)
-            m_edgeRevealButton->setGeometry(rect());
-        emit geometryChanged();
-        return;
-    }
     updateResponsiveLayout();
-    move(boundedPosition(pos()));
-    m_expandedPosition = pos();
-    m_expandedSize = size();
-    scheduleGlassBackdropRefresh();
+    if (!m_isMaximized) {
+        if (!m_resizing)
+            move(boundedPosition(pos()));
+    }
     m_geometrySaveTimer.start();
     emit geometryChanged();
 }
-
 void SmartSpaceWidget::contextMenuEvent(QContextMenuEvent *event)
 {
     QMenu menu(this);
     applyMenuTheme(&menu);
     QAction *pin = menu.addAction(
         m_alwaysOnTop ? QStringLiteral("取消置顶") : QStringLiteral("置顶"));
-    QAction *hide = menu.addAction(QStringLiteral("贴边隐藏"));
     menu.addSeparator();
     QAction *refresh = menu.addAction(smartMenuIcon(QStringLiteral("refresh")),
                                       QStringLiteral("更新索引（增量复用）"));
@@ -6163,8 +5620,6 @@ void SmartSpaceWidget::contextMenuEvent(QContextMenuEvent *event)
     QAction *selected = menu.exec(event->globalPos());
     if (selected == pin)
         setAlwaysOnTop(!m_alwaysOnTop);
-    else if (selected == hide)
-        hideToNearestEdge();
     else if (selected == refresh)
         startIndexing();
     else if (selected == settings)
@@ -6180,7 +5635,7 @@ bool SmartSpaceWidget::eventFilter(QObject *watched, QEvent *event)
     auto *title = qobject_cast<QLabel *>(watched);
     if (title && title->property("cardName").toBool()) {
         if (event->type() == QEvent::Leave) {
-            LiquidPopup::hideText();
+            QToolTip::hideText();
         } else if (event->type() == QEvent::ToolTip ||
                    event->type() == QEvent::MouseMove) {
             const QPoint pos = event->type() == QEvent::ToolTip
@@ -6189,7 +5644,7 @@ bool SmartSpaceWidget::eventFilter(QObject *watched, QEvent *event)
             const int textEnd = title->contentsRect().left() +
                 title->fontMetrics().horizontalAdvance(title->text());
             if (pos.x() >= textEnd) {
-                LiquidPopup::hideText();
+                QToolTip::hideText();
                 if (event->type() == QEvent::ToolTip)
                     return true;
             }
@@ -6207,7 +5662,7 @@ bool SmartSpaceWidget::eventFilter(QObject *watched, QEvent *event)
     if (watched == m_indexProgress) {
         if ((event->type() == QEvent::Enter || event->type() == QEvent::ToolTip)
             && m_indexProgress && m_indexProgress->isVisible()) {
-            LiquidPopup::showText(
+            QToolTip::showText(
                 m_indexProgress->mapToGlobal(
                     QPoint(m_indexProgress->width() / 2,
                            m_indexProgress->height() + 4)),
@@ -6215,25 +5670,246 @@ bool SmartSpaceWidget::eventFilter(QObject *watched, QEvent *event)
             return event->type() == QEvent::ToolTip;
         }
         if (event->type() == QEvent::Leave)
-            LiquidPopup::hideText();
-    }
-    if (!m_fenceEmbedded && watched == m_header) {
-        if (event->type() == QEvent::MouseButtonPress) {
-            auto *mouse = static_cast<QMouseEvent *>(event);
-            if (mouse->button() == Qt::LeftButton) {
-                m_dragging = true;
-                m_dragOffset = mouse->globalPos() - frameGeometry().topLeft();
-                return true;
-            }
-        } else if (event->type() == QEvent::MouseMove && m_dragging) {
-            auto *mouse = static_cast<QMouseEvent *>(event);
-            move(boundedPosition(mouse->globalPos() - m_dragOffset));
-            return true;
-        } else if (event->type() == QEvent::MouseButtonRelease && m_dragging) {
-            m_dragging = false;
-            saveSettings();
-            return true;
-        }
+            QToolTip::hideText();
     }
     return QWidget::eventFilter(watched, event);
+}
+
+namespace {
+constexpr int kResizeLeft = 1;
+constexpr int kResizeRight = 2;
+constexpr int kResizeTop = 4;
+constexpr int kResizeBottom = 8;
+constexpr int kResizeBand = 6;
+}
+
+int SmartSpaceWidget::hitResizeEdges(const QPoint &pos) const
+{
+    if (m_fenceEmbedded || isWindowMaximized())
+        return 0;
+    int edges = 0;
+    if (pos.x() <= kResizeBand) edges |= kResizeLeft;
+    else if (pos.x() >= width() - kResizeBand - 1) edges |= kResizeRight;
+    if (pos.y() <= kResizeBand - 2) edges |= kResizeTop;
+    else if (pos.y() >= height() - kResizeBand - 1) edges |= kResizeBottom;
+    return edges;
+}
+
+void SmartSpaceWidget::updateResizeCursor(const QPoint &pos)
+{
+    const int edges = hitResizeEdges(pos);
+    if ((edges & kResizeLeft && edges & kResizeTop) ||
+        (edges & kResizeRight && edges & kResizeBottom))
+        setCursor(Qt::SizeFDiagCursor);
+    else if ((edges & kResizeRight && edges & kResizeTop) ||
+             (edges & kResizeLeft && edges & kResizeBottom))
+        setCursor(Qt::SizeBDiagCursor);
+    else if (edges & (kResizeLeft | kResizeRight))
+        setCursor(Qt::SizeHorCursor);
+    else if (edges & (kResizeTop | kResizeBottom))
+        setCursor(Qt::SizeVerCursor);
+    else
+        unsetCursor();
+}
+
+static bool insideTitleBar(QWidget *self, QWidget *bar, const QPoint &pos)
+{
+    if (!bar || !bar->isVisible())
+        return false;
+    const QRect area(bar->mapTo(self, QPoint(0, 0)), bar->size());
+    return area.contains(pos);
+}
+
+void SmartSpaceWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (m_fenceEmbedded || event->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+    const int edges = hitResizeEdges(event->pos());
+    if (edges) {
+        m_resizing = true;
+        m_resizeEdges = edges;
+        m_resizeStartGlobal = event->globalPos();
+        m_resizeStartGeom = geometry();
+        event->accept();
+        return;
+    }
+    if (insideTitleBar(this, m_actionRail, event->pos())) {
+        m_dragging = true;
+        m_dragStartGlobal = event->globalPos();
+        m_dragOffset = event->globalPos() - frameGeometry().topLeft();
+        event->accept();
+        return;
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void SmartSpaceWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (m_resizing) {
+        const QPoint delta = event->globalPos() - m_resizeStartGlobal;
+        QRect g = m_resizeStartGeom;
+        const QSize minimum = minimumSize();
+        if (m_resizeEdges & kResizeLeft)
+            g.setLeft(qMin(g.left() + delta.x(), g.right() - minimum.width() + 1));
+        if (m_resizeEdges & kResizeRight)
+            g.setRight(qMax(g.right() + delta.x(), g.left() + minimum.width() - 1));
+        if (m_resizeEdges & kResizeTop)
+            g.setTop(qMin(g.top() + delta.y(), g.bottom() - minimum.height() + 1));
+        if (m_resizeEdges & kResizeBottom)
+            g.setBottom(qMax(g.bottom() + delta.y(), g.top() + minimum.height() - 1));
+        setGeometry(g);
+        event->accept();
+        return;
+    }
+    if (m_dragging) {
+        if (isWindowMaximized()) {
+            if ((event->globalPos() - m_dragStartGlobal).manhattanLength() < 8)
+                return;
+            // Restore under the pointer, keeping the same relative grab point.
+            const qreal ratio = width() > 0 ? qreal(m_dragOffset.x()) / width() : 0.5;
+            setWindowMaximized(false);
+            m_dragOffset = QPoint(qRound(width() * ratio), qMin(m_dragOffset.y(), 24));
+        }
+        move(event->globalPos() - m_dragOffset);
+        event->accept();
+        return;
+    }
+    if (!(event->buttons() & Qt::LeftButton))
+        updateResizeCursor(event->pos());
+    QWidget::mouseMoveEvent(event);
+}
+
+void SmartSpaceWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (m_resizing || m_dragging) {
+        const bool dragged = m_dragging;
+        m_resizing = false;
+        m_dragging = false;
+        m_resizeEdges = 0;
+        if (dragged && !isWindowMaximized())
+            move(boundedPosition(pos()));
+        saveSettings();
+        event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
+}
+
+void SmartSpaceWidget::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (!m_fenceEmbedded && event->button() == Qt::LeftButton &&
+        insideTitleBar(this, m_actionRail, event->pos()) &&
+        !hitResizeEdges(event->pos())) {
+        m_dragging = false;
+        toggleMaximized();
+        event->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
+}
+
+void SmartSpaceWidget::setWindowMaximized(bool maximized)
+{
+    if (m_fenceEmbedded)
+        return;
+    if (maximized == m_isMaximized) {
+        updateWindowStateButtons();
+        return;
+    }
+    if (maximized) {
+        m_normalGeometry = geometry();
+        QScreen *screen = QGuiApplication::screenAt(geometry().center());
+        if (!screen)
+            screen = QGuiApplication::primaryScreen();
+        m_isMaximized = true;
+        if (screen)
+            setGeometry(screen->availableGeometry());
+        showMaximized();
+    } else {
+        m_isMaximized = false;
+        showNormal();
+        QRect target = m_normalGeometry.isValid()
+            ? m_normalGeometry : QRect(pos(), QSize(kDefaultWidth, kDefaultHeight));
+        target.setSize(target.size().expandedTo(minimumSize()));
+        setGeometry(target);
+        move(boundedPosition(target.topLeft()));
+    }
+    if (layout())
+        layout()->setContentsMargins(m_isMaximized ? 0 : 1, m_isMaximized ? 0 : 1,
+                                     m_isMaximized ? 0 : 1, m_isMaximized ? 0 : 1);
+    updateWindowStateButtons();
+    updateRoundedMask();
+    update();
+    m_geometrySaveTimer.start();
+    emit geometryChanged();
+}
+
+void SmartSpaceWidget::toggleMaximized()
+{
+    setWindowMaximized(!isWindowMaximized());
+}
+
+void SmartSpaceWidget::minimizeWindow()
+{
+    if (m_fenceEmbedded)
+        return;
+    showMinimized();
+}
+
+void SmartSpaceWidget::updateWindowStateButtons()
+{
+    if (auto *bar=qobject_cast<AiSpace::WindowTitleBarWidget *>(m_actionRail))
+        bar->setAppearance(m_themeMode==2,isActiveWindow(),isWindowMaximized());
+    if (m_sizeGrip)
+        m_sizeGrip->setVisible(!m_fenceEmbedded && !isWindowMaximized());
+}
+
+void SmartSpaceWidget::setSettingsViewVisible(bool visible)
+{
+    if (!m_mainStack || !m_settingsHost || !m_workspacePage)
+        return;
+    if (visible) {
+        // Rebuild every time so the page reflects the current saved values.
+        if (QLayout *hostLayout = m_settingsHost->layout()) {
+            while (QLayoutItem *item = hostLayout->takeAt(0)) {
+                if (QWidget *w = item->widget())
+                    w->deleteLater();
+                delete item;
+            }
+            hostLayout->addWidget(createSettingsPage(m_settingsHost));
+        }
+        m_mainStack->setCurrentWidget(m_settingsHost);
+    } else {
+        m_mainStack->setCurrentWidget(m_workspacePage);
+    }
+    m_settingsViewVisible = visible;
+    if (m_searchNavButton) {
+        m_searchNavButton->setVisible(visible);
+        const QSignalBlocker blocker(m_searchNavButton);
+        m_searchNavButton->setChecked(!visible);
+    }
+    if (m_moreButton) {
+        const QSignalBlocker blocker(m_moreButton);
+        m_moreButton->setChecked(visible);
+    }
+    emit geometryChanged();
+}
+
+
+// Focus changes affect only the title controls.
+bool SmartSpaceWidget::event(QEvent *event) {
+    const bool repaint=event->type()==QEvent::WindowActivate || event->type()==QEvent::WindowDeactivate;
+    const bool result=QWidget::event(event);
+    if (event->type()==QEvent::WindowStateChange) {
+        const bool nativeMaximized=isMaximized();
+        if (nativeMaximized && !m_isMaximized) {
+            m_normalGeometry=normalGeometry();
+            m_isMaximized=true;
+        } else if (!nativeMaximized && !isMinimized()) m_isMaximized=false;
+        updateWindowStateButtons();updateRoundedMask();
+    }
+    if (repaint && m_actionRail) {updateWindowStateButtons();update();}
+    return result;
 }

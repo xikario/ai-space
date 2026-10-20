@@ -1,12 +1,12 @@
 # AI空间
 
-独立的 Qt 5 液态文件检索应用，面向银河麒麟 V10 / UKUI X11。由 [UKUI Liquid Desktop](https://github.com/xikario/ukui-liquid-desktop) 的智能空间拆出，保留本地索引、OCR、结构化文档提取、知识库与液态界面；无需启动或安装 Fences。
+独立的 Qt 5 本地文件检索应用，面向银河麒麟 V10 / UKUI X11。由 [UKUI Liquid Desktop](https://github.com/xikario/ukui-liquid-desktop) 的智能空间拆出，保留本地索引、OCR、结构化文档提取、知识库与独立界面；无需启动或安装 Fences。
 
 当前版本 **0.1.1**。这是独立应用的初始版本，不是远程 AI 聊天客户端。默认检索和建库均在本机进行；用户显式配置的 Command / HTTP / D-Bus Provider 可调用外部程序或服务。
 
 ## 构建与运行
 
-需要 CMake 3.16+、C++17、Qt 5.12+（Core、Gui、Widgets、DBus、Network）、OpenGL 开发头文件、Zlib、Python 3.7+。常见 Debian/Ubuntu 开发包：`build-essential cmake qtbase5-dev libgl1-mesa-dev zlib1g-dev`。运行需要图形会话及会话 D-Bus；当前重点支持 X11。
+需要 CMake 3.16+、C++17、Qt 5.12+（Core、Gui、Widgets、DBus、Network）、Zlib、Python 3.7+。常见 Debian/Ubuntu 开发包：`build-essential cmake qtbase5-dev zlib1g-dev`。运行需要图形会话及会话 D-Bus；当前重点支持 X11。
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -14,7 +14,7 @@ cmake --build build -j2
 ./build/ai-space --show
 ```
 
-系统缺少 Qt 开发文件时，可用 `-DAI_SPACE_QT_SDK_ROOT=/path/to/sdk`；OpenGL 头文件可由 `-DAI_SPACE_GL_INCLUDE_DIR=/path/to/include` 指定。无需引用另一个项目的源码。
+系统缺少 Qt 开发文件时，可用 `-DAI_SPACE_QT_SDK_ROOT=/path/to/sdk`。无需引用另一个项目的源码。
 
 安装到用户目录：
 
@@ -29,15 +29,16 @@ PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中�
 
 ## 使用
 
-打开设置，选择索引范围，先做快全量，再按需执行 OCR 或知识库建库。普通打开只读取已有快照，不自动全盘扫描。保持原有文件夹浏览、格式过滤、正文预览、暂停/续扫、贴边星标以及独立液态设置窗口。
+打开设置，选择索引范围，先做快全量，再按需执行 OCR 或知识库建库。普通打开只读取已有快照，不自动全盘扫描。保持原有文件夹浏览、格式过滤、正文预览、暂停/续扫以及内嵌偏好设置页。
 
-命令行：`--show`、`--hide`、`--toggle`、`--settings`、`--status`、`--quit`、`--autostart`。同一会话只运行一个实例。窗口有自己的图标和任务栏身份；最小化可从任务栏恢复，不提供最大化。
+命令行：`--show`、`--hide`、`--toggle`、`--settings`、`--status`、`--quit`、`--autostart`。旧 `--hide` 参数兼容为最小化到任务栏。同一会话只运行一个实例。窗口有自己的图标和任务栏身份；支持最小化、最大化/还原及标题栏拖动。Ctrl+K 随时返回搜索；宽窗口预览与结果并排，窄窗口以预览页显示。
 
 - [索引、检索与界面](docs/SMART_SPACE.md)
 - [知识库与命令行](docs/SMART_SPACE_KNOWLEDGE.md)
 - [结构化正文提取](docs/SMART_SPACE_STRUCTURED_KNOWLEDGE.md)
 - [迁移与进程接口](docs/MIGRATION.md)
 - [拆分验证](docs/VALIDATION.md)
+- [方案 A 适配、界面与验证](docs/WINDOW_MODE_A_20261020.md)
 
 ## 数据与旧版迁移
 
@@ -54,7 +55,7 @@ PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中�
 
 ## 外观和资源
 
-复用 Fences 的 FenceGlassRenderer、Snell shader 和缓存材质；检索、滚动及鼠标反馈复用静态玻璃底图。壁纸由文件变化通知触发更新，后台解码，不定时截取屏幕。Fences 存在时可只读跟随其壁纸及视频首帧；否则使用系统壁纸。独立版不播放或解码视频。
+采用不透明的纯色明暗主题，不读取桌面壁纸，不生成玻璃材质，不执行模糊或折射 shader。保留普通窗口圆角和矢量按钮；贴边隐藏、星标入口和收缩动画已移除。标题栏月亮/太阳按钮切换主题。
 
 扫描、OCR、建库会消耗 CPU / 磁盘；后台低优先级不代表零开销。实际性能取决于文档数量、格式与 OCR 依赖。
 

@@ -1,10 +1,10 @@
 #include "AiSpaceController.h"
 #include "SmartSpaceWidget.h"
 #include "Migration.h"
-#include "WallpaperBackdrop.h"
 #include "../../../shared/async-work/BackgroundTask.h"
-#include "LiquidDialog.h"
 #include <QApplication>
+#include <QDialog>
+#include <QMessageBox>
 #include <QSystemTrayIcon>
 #include <QLabel>
 #include <QVBoxLayout>
@@ -20,6 +20,18 @@
 #include <QSaveFile>
 #include <QTimer>
 #include <QSignalBlocker>
+
+static void showControllerWarning(QWidget *parent, const QString &title, const QString &text)
+{
+    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Ok, parent);
+    box.setWindowTitle(title);
+    box.setStyleSheet(QStringLiteral(
+        "QMessageBox { background: #ffffff; color: #0f172a; }"
+        "QMessageBox QLabel { color: #0f172a; font-size: 13px; }"
+        "QMessageBox QPushButton { background: #2563eb; color: #ffffff; border: none;"
+        " border-radius: 6px; padding: 6px 18px; min-width: 64px; font-weight: 600; }"));
+    box.exec();
+}
 
 static bool writeAutoStart(bool enabled)
 {
@@ -45,23 +57,25 @@ void AiSpaceController::initialize(bool visible,bool settings)
     if(visible && !QSettings().value("migration/legacyV1",false).toBool()
         && !QSettings().value("migration/legacyPreferencesV1",false).toBool()
         && !qEnvironmentVariableIsSet("AI_SPACE_TEST_NO_BOOTSTRAP")) {
-        auto *dialog=new LiquidDialog::Dialog;
+        auto *dialog=new QDialog;
+        dialog->setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
         dialog->setWindowTitle(QStringLiteral("AI空间"));dialog->setWindowIcon(qApp->windowIcon());
+        dialog->setStyleSheet(QStringLiteral(
+            "QDialog { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 12px; }"
+            "QLabel { color: #0f172a; font-size: 14px; font-weight: 500; }"));
         auto *layout=new QVBoxLayout(dialog);
+        layout->setContentsMargins(24, 24, 24, 24);
         layout->addWidget(new QLabel(QStringLiteral("正在导入界面偏好与文件快照…"),dialog));
-        dialog->resize(460,160);dialog->show();m_bootstrap=dialog;
+        dialog->resize(460,140);dialog->show();m_bootstrap=dialog;
         connect(dialog,&QDialog::rejected,this,&AiSpaceController::quit);
     }
     if(settings)m_pending.append([](SmartSpaceWidget *w){QTimer::singleShot(0,w,&SmartSpaceWidget::showSettings);});
     BackgroundTask::run(this,[]{
-        const auto migration=migrateLegacyData(false);
-        WallpaperBackdrop wallpaper;wallpaper.reload();
-        return qMakePair(migration,wallpaper);
-    },[this](const QPair<MigrationResult,WallpaperBackdrop> &result){
-        WallpaperBackdrop::shared()=result.second;
+        return migrateLegacyData(false);
+    },[this](const MigrationResult &result){
         auto *widget=new SmartSpaceWidget;
         m_widget=widget;
-        m_migrationPending=result.first.knowledgePending;
+        m_migrationPending=result.knowledgePending;
         widget->setKnowledgeMigrationPending(m_migrationPending);
         connect(widget,&SmartSpaceWidget::indexLoaded,this,[this]{m_indexReadyMs=m_startup.elapsed();notify();});
         widget->setWindowTitle(QStringLiteral("AI空间"));
@@ -73,7 +87,7 @@ void AiSpaceController::initialize(bool visible,bool settings)
             if(!writeAutoStart(on)) {
                 const QSignalBlocker blocker(widget);
                 widget->setAutoStart(!on);
-                QTimer::singleShot(0,widget,[widget]{LiquidDialog::warning(widget,QStringLiteral("登录启动"),QStringLiteral("无法更新登录启动文件，请检查用户配置目录的权限。"));});
+                QTimer::singleShot(0,widget,[widget]{showControllerWarning(widget,QStringLiteral("登录启动"),QStringLiteral("无法更新登录启动文件，请检查用户配置目录的权限。"));});
             }
             notify();
         });
@@ -83,7 +97,7 @@ void AiSpaceController::initialize(bool visible,bool settings)
         }
         applyWindowMode();
         if(m_bootstrap){m_bootstrap->hide();m_bootstrap->deleteLater();}
-        if(m_requestedVisible)showWindow();else widget->hide();
+        if(m_requestedVisible)showWindow();else widget->showMinimized();
         m_uiReadyMs=m_startup.elapsed();
         for(auto &action:m_pending)action(widget);
         m_pending.clear();
@@ -94,21 +108,16 @@ void AiSpaceController::initialize(bool visible,bool settings)
         menu->addSeparator();menu->addAction(QStringLiteral("退出AI空间"),this,&AiSpaceController::quit);
         m_tray->setContextMenu(menu);m_tray->setToolTip(QStringLiteral("AI空间"));m_tray->show();
         connect(m_tray,&QSystemTrayIcon::activated,this,[this](QSystemTrayIcon::ActivationReason r){if(r==QSystemTrayIcon::Trigger)showWindow();});
-        m_wallpaperWatcher=new QFileSystemWatcher(this);auto *debounce=new QTimer(this);
-        debounce->setSingleShot(true);debounce->setInterval(250);watchWallpaper();
-        connect(m_wallpaperWatcher,&QFileSystemWatcher::fileChanged,debounce,QOverload<>::of(&QTimer::start));
-        connect(m_wallpaperWatcher,&QFileSystemWatcher::directoryChanged,debounce,QOverload<>::of(&QTimer::start));
-        connect(debounce,&QTimer::timeout,this,&AiSpaceController::refreshWallpaper);
-        if(!result.first.ok)QTimer::singleShot(0,widget,[widget,error=result.first.error]{LiquidDialog::warning(widget,QStringLiteral("导入旧数据"),error);});
+        if(!result.ok)QTimer::singleShot(0,widget,[widget,error=result.error]{showControllerWarning(widget,QStringLiteral("导入旧数据"),error);});
         notify();
-        if(result.first.ok && m_migrationPending) {
+        if(result.ok && m_migrationPending) {
             BackgroundTask::run(this,[]{return migrateLegacyData();},[this](const MigrationResult &migration){
                 m_migrationPending=false;
                 if(m_widget)m_widget->setKnowledgeMigrationPending(false);
                 notify();
                 if(!migration.ok && m_widget) {
                     const auto widget=m_widget;
-                    QTimer::singleShot(0,widget,[widget,error=migration.error]{if(widget)LiquidDialog::warning(widget,QStringLiteral("导入旧知识库"),error);});
+                    QTimer::singleShot(0,widget,[widget,error=migration.error]{if(widget)showControllerWarning(widget,QStringLiteral("导入旧知识库"),error);});
                 }
             });
         }
@@ -116,64 +125,65 @@ void AiSpaceController::initialize(bool visible,bool settings)
 }
 void AiSpaceController::perform(std::function<void(SmartSpaceWidget*)> action) { if(m_widget)action(m_widget);else if(m_pending.size()<64)m_pending.append(std::move(action)); }
 void AiSpaceController::applyWindowMode() {
-    if(!m_widget)return;const bool visible=m_widget->isVisible();const QPoint p=m_widget->pos();
-    m_widget->setWindowFlags(Qt::Window|Qt::FramelessWindowHint|Qt::WindowMinimizeButtonHint|Qt::WindowCloseButtonHint|(m_widget->alwaysOnTop()?Qt::WindowStaysOnTopHint:Qt::WindowFlags()));
-    m_widget->recreateNativeSurface(true);m_widget->move(p);if(visible)m_widget->show();
+    if(!m_widget)return;const bool visible=m_widget->isVisible();const bool minimized=m_widget->isMinimized();const QPoint p=m_widget->pos();
+    m_widget->setWindowFlags(Qt::Window|Qt::FramelessWindowHint|Qt::WindowMinimizeButtonHint|Qt::WindowMaximizeButtonHint|Qt::WindowCloseButtonHint|(m_widget->alwaysOnTop()?Qt::WindowStaysOnTopHint:Qt::WindowFlags()));
+    m_widget->recreateNativeSurface(true);m_widget->move(p);if(visible){if(minimized)m_widget->showMinimized();else m_widget->show();}
 }
 void AiSpaceController::notify(){emit stateChanged(status());}
 QString AiSpaceController::status() const {
     QJsonObject o{{"application","ai-space"},{"version","0.1.1"},{"ready",bool(m_widget)},{"pid",QCoreApplication::applicationPid()}};
     o.insert("migrationPending",m_migrationPending);o.insert("uiReadyMs",m_uiReadyMs);o.insert("indexReadyMs",m_indexReadyMs);
-    if(m_widget){o.insert("autoStart",m_widget->autoStart());o.insert("visible",m_widget->isVisible());o.insert("edgeHidden",m_widget->edgeHidden());o.insert("indexBusy",m_widget->indexBusy());o.insert("alwaysOnTop",m_widget->alwaysOnTop());o.insert("glassOptics",m_widget->glassOpticsEnabled());o.insert("x",m_widget->x());o.insert("y",m_widget->y());o.insert("width",m_widget->width());o.insert("height",m_widget->height());
+    if(m_widget){o.insert("autoStart",m_widget->autoStart());o.insert("visible",m_widget->isVisible() && !m_widget->isMinimized());o.insert("edgeHidden",m_widget->edgeHidden());o.insert("indexBusy",m_widget->indexBusy());o.insert("alwaysOnTop",m_widget->alwaysOnTop());o.insert("glassOptics",m_widget->glassOpticsEnabled());o.insert("x",m_widget->x());o.insert("y",m_widget->y());o.insert("width",m_widget->width());o.insert("height",m_widget->height());
         o.insert("indexedEntries",m_widget->indexedEntryCount());o.insert("results",m_widget->resultCount());
         o.insert("navigationGroups",m_widget->property("navigationGroups").toInt());
         o.insert("windowId",QString::number(m_widget->internalWinId()));
         o.insert("materialBuilds",m_widget->property("smartGlassMaterialBuilds").toInt());
         o.insert("glassBackend",m_widget->property("smartGlassMaterialBackend").toString());
+        o.insert("previewVisible",m_widget->property("previewVisible").toBool());
+        o.insert("previewDocked",m_widget->property("previewDocked").toBool());
+        o.insert("usedGpu",m_widget->property("smartGlassUsedGpu").toBool());
         o.insert("indexLoading",m_widget->property("indexLoading").toBool());
         o.insert("indexApplyMs",m_widget->property("indexApplyMs").toInt());
         o.insert("maximizable",bool(m_widget->windowFlags() & Qt::WindowMaximizeButtonHint));
+        o.insert("maximized",m_widget->isWindowMaximized());
+        o.insert("minimized",m_widget->isMinimized());
+        o.insert("settingsVisible",m_widget->settingsViewVisible());
         o.insert("active",m_widget->edgeTransitionActive());
     }
     return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
 }
-void AiSpaceController::showWindow(){m_requestedVisible=true;if(m_widget){m_widget->showNormal();m_widget->revealFromEdge();m_widget->raise();m_widget->activateWindow();notify();}}
-void AiSpaceController::hideWindow(){m_requestedVisible=false;if(m_widget)m_widget->hide();notify();}
-void AiSpaceController::toggleWindow(){if(m_widget && m_widget->isVisible() && !m_widget->edgeHidden())hideWindow();else showWindow();}
+void AiSpaceController::showWindow(){
+    m_requestedVisible=true;
+    if(m_widget){
+        if(m_widget->isMinimized()) {
+            if(m_widget->isWindowMaximized())m_widget->showMaximized();
+            else m_widget->showNormal();
+        }
+        if(m_widget->isWindowMaximized())m_widget->show();
+        else m_widget->showNormal();
+        m_widget->raise();
+        m_widget->activateWindow();
+        notify();
+    }
+}
+// Deprecated hide entry points now use the normal taskbar minimize path.
+void AiSpaceController::hideWindow(){m_requestedVisible=false;if(m_widget)m_widget->minimizeWindow();notify();}
+void AiSpaceController::toggleWindow(){if(m_widget && m_widget->isVisible() && !m_widget->isMinimized())hideWindow();else showWindow();}
 void AiSpaceController::showSettings(){showWindow();perform([](SmartSpaceWidget*w){QTimer::singleShot(0,w,&SmartSpaceWidget::showSettings);});}
 void AiSpaceController::quit(){qApp->quit();}
 void AiSpaceController::setAlwaysOnTop(bool v){perform([v](SmartSpaceWidget*w){w->setAlwaysOnTop(v);});}
 void AiSpaceController::setAutoStart(bool v){perform([v](SmartSpaceWidget*w){w->setAutoStart(v);});}
-void AiSpaceController::hideToEdge(){perform([](SmartSpaceWidget*w){w->hideToNearestEdge();});}
+void AiSpaceController::hideToEdge(){minimizeWindow();}
 void AiSpaceController::revealFromEdge(){showWindow();}
 void AiSpaceController::moveWindow(int x,int y){perform([=](SmartSpaceWidget*w){w->move(x,y);});}
 void AiSpaceController::resizeWindow(int x,int y){perform([=](SmartSpaceWidget*w){w->resize(qBound(620,x,2400),qBound(360,y,1600));});}
+void AiSpaceController::minimizeWindow(){perform([this](SmartSpaceWidget*w){w->minimizeWindow();notify();});}
+void AiSpaceController::maximizeWindow(){perform([this](SmartSpaceWidget*w){w->setWindowMaximized(true);notify();});}
+void AiSpaceController::restoreWindow(){perform([this](SmartSpaceWidget*w){w->setWindowMaximized(false);notify();});}
+void AiSpaceController::toggleMaximize(){perform([this](SmartSpaceWidget*w){w->toggleMaximized();notify();});}
 void AiSpaceController::setDensity(int v){perform([v](SmartSpaceWidget*w){w->setResultDensity(v);});}
-void AiSpaceController::setGlassOptics(bool v){perform([v](SmartSpaceWidget*w){w->setSimpleTheme(3,false);w->setGlassOpticsEnabled(v);});}
+void AiSpaceController::setGlassOptics(bool v){perform([v](SmartSpaceWidget*w){w->setGlassOpticsEnabled(v);});}
 void AiSpaceController::startFullIndex(){perform([](SmartSpaceWidget*w){QTimer::singleShot(0,w,&SmartSpaceWidget::startFastFullIndex);});}
 void AiSpaceController::hideFolder(const QString&p){perform([p](SmartSpaceWidget*w){w->hideFolder(p);});}
 void AiSpaceController::excludeFolder(const QString&p){perform([p](SmartSpaceWidget*w){QTimer::singleShot(0,w,[w,p]{w->excludeFolder(p);});});}
 void AiSpaceController::search(const QString&q){showWindow();perform([q](SmartSpaceWidget*w){w->searchFor(q);});}
-
-void AiSpaceController::watchWallpaper() {
-    if(!m_wallpaperWatcher)return;
-    const QString config=QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
-    QStringList paths=WallpaperBackdrop::shared().sourceWatchPaths();
-    paths<<config+"/kyfences"<<config+"/kylin"<<config+"/dconf";
-    const auto files=paths;
-    for(const auto &path:files)if(!path.isEmpty())paths<<QFileInfo(path).absolutePath();
-    paths.removeDuplicates();
-    for(const auto &path:paths)if(QFileInfo::exists(path) && !m_wallpaperWatcher->files().contains(path)
-        && !m_wallpaperWatcher->directories().contains(path))m_wallpaperWatcher->addPath(path);
-}
-void AiSpaceController::refreshWallpaper() {
-    if(m_wallpaperLoading){m_wallpaperPending=true;return;}
-    m_wallpaperLoading=true;
-    const auto previous=WallpaperBackdrop::shared();
-    BackgroundTask::run(this,[previous]{auto value=previous;const bool changed=value.reload();return qMakePair(changed,value);},[this](const QPair<bool,WallpaperBackdrop> &result){
-        m_wallpaperLoading=false;
-        if(m_wallpaperPending){m_wallpaperPending=false;refreshWallpaper();return;}
-        WallpaperBackdrop::shared()=result.second;watchWallpaper();
-        if(result.first && m_widget)m_widget->invalidateWallpaper();
-    });
-}

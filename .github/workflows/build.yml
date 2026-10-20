@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y qtbase5-dev libgl1-mesa-dev zlib1g-dev xvfb dbus-x11 x11-utils fonts-noto-cjk poppler-utils tesseract-ocr python3-pil python3-reportlab
+      - run: sudo apt-get update && sudo apt-get install -y qtbase5-dev libgl1-mesa-dev zlib1g-dev xvfb dbus-x11 x11-utils xdotool fonts-noto-cjk poppler-utils tesseract-ocr python3-pil python3-reportlab
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build -j2
       - run: ctest --output-on-failure -j2

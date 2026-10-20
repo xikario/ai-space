@@ -20,7 +20,7 @@ gdbus call --session --dest org.ukui.AiSpace --object-path /aiSpace \
   --method org.ukui.AiSpace.search '项目方案'
 ```
 
-`status` 返回 JSON；还提供 showWindow / hideWindow / toggleWindow / showSettings / quit、窗口位置/尺寸、贴边收起/恢复、密度与全量索引入口。显式全量索引仍有用户确认。无服务时 `--status` 不启动索引应用。
+`status` 返回 JSON；还提供 showWindow / hideWindow / toggleWindow / showSettings / quit、窗口位置/尺寸、密度与全量索引入口。贴边收起能力已移除；旧 hideWindow / hideToEdge / --hide 兼容为最小化到任务栏，revealFromEdge 兼容为恢复普通窗口。显式全量索引仍有用户确认。无服务时 `--status` 不启动索引应用。
 
 Fences 的旧 `showSmartSpaceWidget` 等 D-Bus 方法转发到此服务，查询使用异步状态缓存，因此状态可有短暂延迟。`ukui-fences --smart-space` 直接启动独立程序，不新建 Fences 桌面。可用 `AI_SPACE_BINARY=/absolute/path/ai-space` 指定开发构建；默认查找 PATH 和 Fences 相邻目录。两套应用退出互不影响。
 

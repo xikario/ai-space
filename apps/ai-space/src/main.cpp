@@ -1,5 +1,4 @@
 #include "AiSpaceController.h"
-#include "LiquidPopup.h"
 #include "../../../shared/async-work/BackgroundTask.h"
 #include <QApplication>
 #include <QDBusConnection>
@@ -30,7 +29,6 @@ int main(int argc,char **argv)
     }
     if(parser.isSet("quit") || parser.isSet("status"))return 0;
     if(!parser.isSet("autostart"))qputenv("AI_SPACE_EXPLICIT_SHOW","1");
-    LiquidPopup::install(app);
     AiSpaceController controller;
     if(!bus.registerObject("/aiSpace",&controller,QDBusConnection::ExportScriptableSlots|QDBusConnection::ExportAllSignals))return 1;
     controller.initialize(!parser.isSet("hide"),parser.isSet("settings"));

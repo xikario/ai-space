@@ -31,6 +31,10 @@ public slots:
     Q_SCRIPTABLE void revealFromEdge();
     Q_SCRIPTABLE void moveWindow(int x,int y);
     Q_SCRIPTABLE void resizeWindow(int width,int height);
+    Q_SCRIPTABLE void minimizeWindow();
+    Q_SCRIPTABLE void maximizeWindow();
+    Q_SCRIPTABLE void restoreWindow();
+    Q_SCRIPTABLE void toggleMaximize();
     Q_SCRIPTABLE void setDensity(int value);
     Q_SCRIPTABLE void setGlassOptics(bool value);
     Q_SCRIPTABLE void startFullIndex();
@@ -41,15 +45,11 @@ signals:
 private:
     void notify();
     void applyWindowMode();
-    void refreshWallpaper();
-    void watchWallpaper();
     void perform(std::function<void(SmartSpaceWidget*)> action);
     QPointer<SmartSpaceWidget> m_widget;
     QList<std::function<void(SmartSpaceWidget*)>> m_pending;
     QSystemTrayIcon *m_tray=nullptr;
     QPointer<QWidget> m_bootstrap;
-    QFileSystemWatcher *m_wallpaperWatcher=nullptr;
-    bool m_wallpaperLoading=false,m_wallpaperPending=false;
     bool m_requestedVisible=true;
     bool m_migrationPending=false;
     QElapsedTimer m_startup;

@@ -1,5 +1,4 @@
 #pragma once
-class PointerEffect;
 
 #include <QDateTime>
 #include <QColor>
@@ -19,7 +18,6 @@ class PointerEffect;
 #include <memory>
 
 class QFileSystemWatcher;
-class FenceGlassRenderer;
 class QContextMenuEvent;
 class QEvent;
 class QLineEdit;
@@ -64,7 +62,6 @@ struct SmartSpaceEntry {
 class SmartSpaceWidget : public QWidget
 {
     Q_OBJECT
-    friend struct PointerEffectTestAccess;
     friend class SmartSpaceStartupTestAccess;
     friend class SmartSpaceOpticsTestAccess;
 public:
@@ -89,18 +86,20 @@ public:
     void recreateNativeSurface(bool translucent);
     // Refresh the wallpaper material behind the liquid-glass skin. Call this
     // before mapping a newly-created widget so the first frame is clean.
-    void refreshGlassBackdrop();
-    void invalidateWallpaper();
     int indexedEntryCount() const { return m_entries.size(); }
     int resultCount() const;
     void searchFor(const QString &query);
     void setGlassOpticsEnabled(bool enabled, bool persist = true);
-    bool glassOpticsEnabled() const { return m_glassOpticsEnabled; }
+    bool glassOpticsEnabled() const { return false; }
     void setSimpleTheme(int mode, bool persist = true);
-    void hideToNearestEdge();
-    void revealFromEdge();
-    bool edgeHidden() const { return m_edgeHidden; }
-    bool edgeTransitionActive() const { return !m_edgeTransition.isNull(); }
+    bool edgeHidden() const { return false; }
+    bool edgeTransitionActive() const { return false; }
+    bool isWindowMaximized() const { return m_isMaximized || isMaximized(); }
+    void setWindowMaximized(bool maximized);
+    void toggleMaximized();
+    void minimizeWindow();
+    void setSettingsViewVisible(bool visible);
+    bool settingsViewVisible() const { return m_settingsViewVisible; }
     QColor fenceThemeColor() const { return m_surfaceColor; }
     QColor titleThemeColor() const { return m_textColor; }
     void refreshInheritedTheme();
@@ -115,9 +114,14 @@ signals:
     void geometryChanged();
 
 protected:
+    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void moveEvent(QMoveEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -127,12 +131,11 @@ private:
         FolderLevelRole
     };
 
+    int hitResizeEdges(const QPoint &pos) const;
+    void updateResizeCursor(const QPoint &pos);
+    void updateWindowStateButtons();
     void buildUi();
     void applyTheme();
-    void scheduleGlassBackdropRefresh();
-    void finishEdgeTransition();
-    void animateEdgeReveal();
-    void animateEdgeFrame(const QPixmap &snapshot, const QRect &area, bool revealing);
     void applyMenuTheme(QMenu *menu) const;
     void configureIndexScheduling();
     QWidget *createPanel(const QString &title, QWidget *content,
@@ -253,7 +256,6 @@ private:
     bool m_idleIndexCancelled = false;
     bool m_idleUsesProcessGroup = false;
     bool m_automaticIndexingReady = false;
-    bool m_defaultHidden = true;
     QString m_knowledgeDirectory;
     int m_knowledgeChunkSize = 1200;
     int m_knowledgeOverlap = 120;
@@ -292,35 +294,27 @@ private:
     bool m_indexBusy = false;
     bool m_reindexPending = false;
     bool m_dragging = false;
+    bool m_resizing = false;
+    int m_resizeEdges = 0;
+    QPoint m_resizeStartGlobal;
+    QRect m_resizeStartGeom;
+    QPoint m_dragStartGlobal;
+    bool m_isMaximized = false;
+    QRect m_normalGeometry;
+    bool m_settingsViewVisible = false;
     bool m_fenceEmbedded = false;
-    bool m_edgeHidden = false;
-    int m_edgeSide = 0;
     QPoint m_dragOffset;
-    QPoint m_expandedPosition;
-    QSize m_expandedSize {920, 520};
-    QImage m_glassBackdrop;
-    QImage m_glassMaterial;
-    QRegion m_glassCoverage;
-    // Independent application owns its material renderer.
-    // Built once per wallpaper/geometry change and reused during interaction.
-    std::unique_ptr<FenceGlassRenderer> m_standaloneGlassRenderer;
-    bool m_glassOpticsEnabled = false;
-    QSize m_glassMaterialSize;
-    QRect m_glassBackdropGeometry;
-    qreal m_glassBackdropDpr = 0;
-    QPointer<QWidget> m_edgeTransition;
     QTimer m_geometrySaveTimer;
-    QTimer m_glassBackdropRefreshTimer;
-    QRegion glassPointerDamage(const QPoint &position) const;
-    const QImage &glassMaterial();
-    void cacheGlassBackdrop(const QImage &image);
-    PointerEffect *m_glassPointerEffect = nullptr;
-    QPoint m_glassPointerPosition;
-    bool m_glassPointerActive = false;
+
 
     QFrame *m_actionRail = nullptr;
     QWidget *m_contentContainer = nullptr;
+    QStackedWidget *m_mainStack = nullptr;
+    QWidget *m_workspacePage = nullptr;
+    QWidget *m_settingsHost = nullptr;
     QWidget *m_header = nullptr;
+    QLabel *m_brandIconLabel = nullptr;
+    QLabel *m_brandTitleLabel = nullptr;
     QLabel *m_statusLabel = nullptr;
     QLabel *m_folderTitleLabel = nullptr;
     QLabel *m_folderCountLabel = nullptr;
@@ -328,8 +322,11 @@ private:
     QLabel *m_fileCountLabel = nullptr;
     QLineEdit *m_searchEdit = nullptr;
     QToolButton *m_searchButton = nullptr;
+    QToolButton *m_searchNavButton = nullptr;
     QToolButton *m_themeToggleButton = nullptr;
-    QToolButton *m_closeButton = nullptr;
+    QToolButton *m_minimizeButton = nullptr;
+    QToolButton *m_maximizeButton = nullptr;
+    QToolButton *m_windowCloseButton = nullptr;
     QToolButton *m_moreButton = nullptr;
     QToolButton *m_idleIndexButton = nullptr;
     QToolButton *m_pauseIndexButton = nullptr;
@@ -337,7 +334,6 @@ private:
 
     QToolButton *m_refreshButton = nullptr;
     QToolButton *m_pinButton = nullptr;
-    QToolButton *m_edgeRevealButton = nullptr;
     QToolButton *m_settingsButton = nullptr;
     QComboBox *m_categoryCombo = nullptr;
     QButtonGroup *m_categoryButtonGroup = nullptr;
