@@ -3,6 +3,8 @@
 #include "Migration.h"
 #include "../../../shared/async-work/BackgroundTask.h"
 #include <QApplication>
+#include <QPushButton>
+#include <memory>
 #include <QDialog>
 #include <QMessageBox>
 #include <QSystemTrayIcon>
@@ -75,12 +77,15 @@ void AiSpaceController::initialize(bool visible,bool settings)
     },[this](const MigrationResult &result){
         auto *widget=new SmartSpaceWidget;
         m_widget=widget;
-        m_migrationPending=result.knowledgePending;
+        // Production never duplicates a multi-GB legacy library at login.
+        // Legacy-copy fault tests explicitly opt in with a disposable HOME.
+        const bool testCopy=qEnvironmentVariableIntValue("AI_SPACE_TEST_LEGACY_COPY")==1 && qEnvironmentVariableIsSet("AI_SPACE_TEST_NO_BOOTSTRAP");
+        m_migrationPending=result.knowledgePending && testCopy;
         widget->setKnowledgeMigrationPending(m_migrationPending);
         connect(widget,&SmartSpaceWidget::indexLoaded,this,[this]{m_indexReadyMs=m_startup.elapsed();notify();});
         widget->setWindowTitle(QStringLiteral("AI空间"));
         widget->setWindowIcon(qApp->windowIcon());
-        connect(widget,&SmartSpaceWidget::closeRequested,this,&AiSpaceController::quit);
+        connect(widget,&SmartSpaceWidget::closeRequested,this,&AiSpaceController::requestClose);
         connect(widget,&SmartSpaceWidget::alwaysOnTopChanged,this,[this]{applyWindowMode();notify();});
         connect(widget,&SmartSpaceWidget::geometryChanged,this,&AiSpaceController::notify);
         connect(widget,&SmartSpaceWidget::autoStartChanged,this,[this,widget](bool on){
@@ -123,6 +128,8 @@ void AiSpaceController::initialize(bool visible,bool settings)
         }
     });
 }
+void AiSpaceController::showKnowledgeStatus(){perform([](SmartSpaceWidget *widget){QTimer::singleShot(0,widget,&SmartSpaceWidget::showKnowledgeStatus);});}
+void AiSpaceController::showKnowledgeManager(){perform([](SmartSpaceWidget *widget){QTimer::singleShot(0,widget,&SmartSpaceWidget::showKnowledgeManager);});}
 void AiSpaceController::perform(std::function<void(SmartSpaceWidget*)> action) { if(m_widget)action(m_widget);else if(m_pending.size()<64)m_pending.append(std::move(action)); }
 void AiSpaceController::applyWindowMode() {
     if(!m_widget)return;const bool visible=m_widget->isVisible();const bool minimized=m_widget->isMinimized();const QPoint p=m_widget->pos();
@@ -147,6 +154,17 @@ QString AiSpaceController::status() const {
         o.insert("maximizable",bool(m_widget->windowFlags() & Qt::WindowMaximizeButtonHint));
         o.insert("maximized",m_widget->isWindowMaximized());
         o.insert("minimized",m_widget->isMinimized());
+        o.insert("knowledgeManagerVisible",m_widget->property("knowledgeManagerVisible").toBool());
+        o.insert("knowledgeWizardStep",m_widget->property("knowledgeWizardStep").toInt());
+        o.insert("knowledgeStatusVisible",m_widget->property("knowledgeStatusVisible").toBool());o.insert("knowledgeStatusLoaded",m_widget->property("knowledgeStatusLoaded").toBool());
+        o.insert("knowledgeFailuresVisible",m_widget->property("knowledgeFailuresVisible").toBool());
+        if(auto *failures=m_widget->findChild<QWidget *>(QStringLiteral("knowledgeFailuresDialog"))){
+            o.insert("failureListLoaded",failures->property("failureListLoaded").toBool());o.insert("failureListIgnored",failures->property("failureListIgnored").toBool());
+            o.insert("failureListCategory",failures->property("failureListCategory").toString());o.insert("failureListTotal",failures->property("failureListTotal").toInt());
+            o.insert("failureListOffset",failures->property("failureListOffset").toInt());
+            o.insert("failureSelectedCount",failures->property("failureSelectedCount").toInt());o.insert("failureAllSelected",failures->property("failureAllSelected").toBool());
+        }
+        o.insert("libraryPreviewLoaded",m_widget->property("libraryPreviewLoaded").toBool());
         o.insert("settingsVisible",m_widget->settingsViewVisible());
         o.insert("active",m_widget->edgeTransitionActive());
     }
@@ -170,7 +188,19 @@ void AiSpaceController::showWindow(){
 void AiSpaceController::hideWindow(){m_requestedVisible=false;if(m_widget)m_widget->minimizeWindow();notify();}
 void AiSpaceController::toggleWindow(){if(m_widget && m_widget->isVisible() && !m_widget->isMinimized())hideWindow();else showWindow();}
 void AiSpaceController::showSettings(){showWindow();perform([](SmartSpaceWidget*w){QTimer::singleShot(0,w,&SmartSpaceWidget::showSettings);});}
-void AiSpaceController::quit(){qApp->quit();}
+void AiSpaceController::requestClose()
+{
+    if(!m_widget || !m_widget->indexBusy()){quit();return;}
+    QMessageBox box(QMessageBox::Question,QStringLiteral("建库任务正在运行"),QStringLiteral("可以保留后台任务，或先暂停并保存已完成内容后退出。"),QMessageBox::NoButton,m_widget);
+    box.setWindowIcon(qApp->windowIcon());auto *background=box.addButton(QStringLiteral("最小化并继续"),QMessageBox::AcceptRole);auto *stop=box.addButton(QStringLiteral("暂停并退出"),QMessageBox::DestructiveRole);box.addButton(QMessageBox::Cancel);box.exec();
+    if(box.clickedButton()==background)hideWindow();else if(box.clickedButton()==stop)quit();
+}
+void AiSpaceController::quit()
+{
+    if(m_quitting)return;
+    if(!m_widget || !m_widget->indexBusy()){qApp->quit();return;}
+    m_quitting=true;m_widget->pauseKnowledgeWork();auto elapsed=std::make_shared<QElapsedTimer>();elapsed->start();auto *timer=new QTimer(this);timer->setInterval(100);connect(timer,&QTimer::timeout,this,[this,timer,elapsed]{if(!m_widget || !m_widget->indexBusy() || elapsed->elapsed()>5000){timer->stop();qApp->quit();}});timer->start();
+}
 void AiSpaceController::setAlwaysOnTop(bool v){perform([v](SmartSpaceWidget*w){w->setAlwaysOnTop(v);});}
 void AiSpaceController::setAutoStart(bool v){perform([v](SmartSpaceWidget*w){w->setAutoStart(v);});}
 void AiSpaceController::hideToEdge(){minimizeWindow();}
@@ -183,6 +213,7 @@ void AiSpaceController::restoreWindow(){perform([this](SmartSpaceWidget*w){w->se
 void AiSpaceController::toggleMaximize(){perform([this](SmartSpaceWidget*w){w->toggleMaximized();notify();});}
 void AiSpaceController::setDensity(int v){perform([v](SmartSpaceWidget*w){w->setResultDensity(v);});}
 void AiSpaceController::setGlassOptics(bool v){perform([v](SmartSpaceWidget*w){w->setGlassOpticsEnabled(v);});}
+void AiSpaceController::pauseKnowledgeTask(){perform([](SmartSpaceWidget *w){w->pauseKnowledgeWork();});}
 void AiSpaceController::startFullIndex(){perform([](SmartSpaceWidget*w){QTimer::singleShot(0,w,&SmartSpaceWidget::startFastFullIndex);});}
 void AiSpaceController::hideFolder(const QString&p){perform([p](SmartSpaceWidget*w){w->hideFolder(p);});}
 void AiSpaceController::excludeFolder(const QString&p){perform([p](SmartSpaceWidget*w){QTimer::singleShot(0,w,[w,p]{w->excludeFolder(p);});});}

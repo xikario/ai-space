@@ -22,6 +22,8 @@ public slots:
     Q_SCRIPTABLE void hideWindow();
     Q_SCRIPTABLE void toggleWindow();
     Q_SCRIPTABLE void showSettings();
+    Q_SCRIPTABLE void showKnowledgeManager();
+    Q_SCRIPTABLE void showKnowledgeStatus();
     Q_SCRIPTABLE void quit();
     Q_SCRIPTABLE QString status() const;
     Q_SCRIPTABLE void search(const QString &query);
@@ -38,11 +40,14 @@ public slots:
     Q_SCRIPTABLE void setDensity(int value);
     Q_SCRIPTABLE void setGlassOptics(bool value);
     Q_SCRIPTABLE void startFullIndex();
+    Q_SCRIPTABLE void pauseKnowledgeTask();
     Q_SCRIPTABLE void hideFolder(const QString &path);
     Q_SCRIPTABLE void excludeFolder(const QString &path);
 signals:
     void stateChanged(const QString &json);
 private:
+    void requestClose();
+    bool m_quitting=false;
     void notify();
     void applyWindowMode();
     void perform(std::function<void(SmartSpaceWidget*)> action);

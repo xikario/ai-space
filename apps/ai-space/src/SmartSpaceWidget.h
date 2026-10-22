@@ -32,6 +32,7 @@ class QToolButton;
 class QMouseEvent;
 class QMoveEvent;
 class QProcess;
+class KnowledgeJobController;
 class QResizeEvent;
 class QScrollArea;
 class QSizeGrip;
@@ -51,6 +52,13 @@ struct SmartSpaceEntry {
     QString suffix;
     QString category;
     QString content;
+    bool libraryOnly = false;
+    QString libraryReference;
+    QString libraryDb;
+    QString libraryName;
+    QString originalPath;
+    qint64 libraryDocumentId = 0;
+    qint64 libraryChunkId = 0;
     QString extractor;
     QString ocrStatus;
     QString ocrReason;
@@ -65,8 +73,7 @@ class SmartSpaceWidget : public QWidget
     friend class SmartSpaceStartupTestAccess;
     friend class SmartSpaceOpticsTestAccess;
 public:
-    explicit SmartSpaceWidget(bool fenceEmbedded = false,
-                              QWidget *parent = nullptr);
+    explicit SmartSpaceWidget(QWidget *parent = nullptr);
     ~SmartSpaceWidget() override;
 
     QWidget *createSettingsPage(QWidget *parent);
@@ -80,13 +87,14 @@ public:
     void showSettings();
     void setKnowledgeMigrationPending(bool pending);
     void startFastFullIndex();
-    bool indexBusy() const { return m_indexBusy; }
+    bool indexBusy() const { return m_libraryJobBusy; }
+    void showKnowledgeManager();
+    void showKnowledgeStatus();
+    void pauseKnowledgeWork(){stopIdleFullIndex();}
     void hideFolder(const QString &path);
     void excludeFolder(const QString &path);
     void recreateNativeSurface(bool translucent);
-    // Refresh the wallpaper material behind the liquid-glass skin. Call this
-    // before mapping a newly-created widget so the first frame is clean.
-    int indexedEntryCount() const { return m_entries.size(); }
+    int indexedEntryCount() const;
     int resultCount() const;
     void searchFor(const QString &query);
     void setGlassOpticsEnabled(bool enabled, bool persist = true);
@@ -157,6 +165,7 @@ private:
                             QListWidgetItem *item);
     const SmartSpaceEntry *entryForPath(const QString &path) const;
     void showPreviewForPath(const QString &path);
+    void readLibraryPreview(const SmartSpaceEntry &entry, int offset = -1);
     void hidePreview();
     void showPreviewImage(const QString &imagePath);
     void startPdfPreview(const SmartSpaceEntry &entry);
@@ -175,7 +184,7 @@ private:
     void startIndexing();
     void startIdleFullIndex();
     void startOcrIndex();
-    void launchIndexer(bool fastFull, bool ocrBackfill = false);
+
     void stopIdleFullIndex();
     bool loadIndex();
     struct IndexSnapshot {
@@ -188,8 +197,8 @@ private:
     bool applyIndexSnapshot(IndexSnapshot snapshot);
     void loadIndexAsync();
     quint64 m_indexLoadRevision = 0;
-    void handleIndexerOutput();
-    void finishIndexing(int exitCode, int exitStatus);
+
+
     void rebuildWatches();
     void scheduleReindex();
 
@@ -209,7 +218,6 @@ private:
     void updateFolderDensity();
     QVector<int> matchingFileIndexes() const;
     int relevancePercent(const SmartSpaceEntry &entry) const;
-    void showResultSortMenu();
 
     void clearFolderLevels(int fromLevel = 0);
     void resetFolderScopeFromBlankClick();
@@ -222,7 +230,12 @@ private:
 
     void showSettingsDialog();
     void startKnowledgeBuild();
+    void startKnowledgeRetry(const QString &db,const QJsonArray &ids,bool ocr);
+    void startGuidedBuild(bool ocr, bool ocrOnly = false, const QString &singleStage = QString(), const QString &targetDirectory = QString(), bool providerApproved = false);
     void startKnowledgeSearch(const QString &query);
+    void applyKnowledgeSearchResult(const QJsonObject &result);
+    QPointer<QProcess> m_knowledgeSearchProcess;
+    quint64 m_knowledgeSearchRevision = 0;
     void startKnowledgeTask(const QString &task,
                             const QStringList &arguments);
     void terminateKnowledgeProcess(bool force);
@@ -230,6 +243,7 @@ private:
     void finishKnowledgeTask(int exitCode, int exitStatus);
 
     QVector<SmartSpaceEntry> m_entries;
+    int m_libraryOnlyEntryCount = 0;
     QStringList m_roots;
     QStringList m_excludedFolders;
     QStringList m_hiddenFolders;
@@ -237,6 +251,8 @@ private:
     QStringList m_visibleExtensions;
     QStringList m_selectedCategories;
     QString m_providerConfig;
+    QString m_providerApprovedDigest;
+    QPointer<QProcess> m_providerAuditProcess;
     QString m_scopePath;
     QString m_executedQuery;
     QStringList m_searchTerms;
@@ -251,16 +267,22 @@ private:
     int m_themeMode = 0;
     bool m_autoStart = false;
     bool m_alwaysOnTop = false;
-    bool m_idleFullIndex = false;
-    bool m_ocrBackfill = false;
-    bool m_idleIndexCancelled = false;
-    bool m_idleUsesProcessGroup = false;
     bool m_automaticIndexingReady = false;
     QString m_knowledgeDirectory;
+    QString m_libraryStorageDirectory;
+    bool m_storageConfirmed = false;
+    int m_storageReserveGiB = 2;
+    int m_libraryQuotaGiB = 32;
+    int m_ocrCpuPercent = 25;
+    int m_ocrMemoryMiB = 1024;
+    bool m_libraryJobBusy = false;
+    QPointer<QProcess> m_libraryPreviewProcess;
     int m_knowledgeChunkSize = 1200;
     int m_knowledgeOverlap = 120;
     QHash<QString, int> m_knowledgeScores;
     QHash<QString, QString> m_knowledgeSnippets;
+    QHash<QString, QString> m_knowledgeExtractionStates;
+    QHash<QString, QString> m_knowledgeAvailability;
     QJsonObject m_knowledgeLastObject;
     QColor m_surfaceColor {15, 23, 42};
     QColor m_cardColor {2, 6, 23, 180};
@@ -291,7 +313,6 @@ private:
     int     m_customFontSize = 13;
     bool    m_customFontBold = false;
     bool m_editMode = false;
-    bool m_indexBusy = false;
     bool m_reindexPending = false;
     bool m_dragging = false;
     bool m_resizing = false;
@@ -302,7 +323,6 @@ private:
     bool m_isMaximized = false;
     QRect m_normalGeometry;
     bool m_settingsViewVisible = false;
-    bool m_fenceEmbedded = false;
     QPoint m_dragOffset;
     QTimer m_geometrySaveTimer;
 
@@ -328,7 +348,9 @@ private:
     QToolButton *m_maximizeButton = nullptr;
     QToolButton *m_windowCloseButton = nullptr;
     QToolButton *m_moreButton = nullptr;
+    QToolButton *m_knowledgeMenuButton = nullptr;
     QToolButton *m_idleIndexButton = nullptr;
+    QToolButton *m_textIndexButton = nullptr;
     QToolButton *m_pauseIndexButton = nullptr;
     QToolButton *m_ocrIndexButton = nullptr;
 
@@ -355,11 +377,8 @@ private:
     QWidget *m_resultPage = nullptr;
     QWidget *m_statusContainer = nullptr;
     QProgressBar *m_indexProgress = nullptr;
-    QByteArray m_indexOutputBuffer;
     QByteArray m_knowledgeOutputBuffer;
     QByteArray m_knowledgeErrorBuffer;
-    int m_indexProcessed = 0;
-    int m_indexTotal = 0;
 
     QFrame *m_previewPanel = nullptr;
     QLabel *m_previewTitle = nullptr;
@@ -377,11 +396,11 @@ private:
     int m_resultSortMode = 0;
     int m_visibleResultLimit = 32;
     QString m_resultPageKey;
-    QToolButton *m_sortButton = nullptr;
+    QComboBox *m_sortCombo = nullptr;
     QToolButton *m_densityDownButton = nullptr;
     QToolButton *m_densityUpButton = nullptr;
 
-    QProcess *m_indexer = nullptr;
+    KnowledgeJobController *m_jobController = nullptr;
     QProcess *m_knowledgeProcess = nullptr;
     bool m_knowledgeUsesProcessGroup = false;
     QFileSystemWatcher *m_watcher = nullptr;

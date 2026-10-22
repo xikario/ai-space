@@ -325,9 +325,12 @@ def ocr_image(path: Path, limit: int, timeout: int = 45) -> str:
     tesseract = shutil.which("tesseract")
     if not tesseract:
         return ""
-    value = run_text_command(
-        [tesseract, str(path), "stdout", "-l", "chi_sim+eng"], timeout,
-    )
+    from ocr_budget import run_ocr
+    with tempfile.TemporaryFile() as output:
+        try:
+            result=run_ocr([tesseract,str(path),"stdout","-l","chi_sim+eng"],stdout=output,timeout=timeout)
+            output.seek(0);value=output.read(max(1024,limit*8)).decode("utf-8",errors="ignore") if result.returncode==0 else ""
+        except (OSError,subprocess.SubprocessError):value=""
     return compact_text(value, limit)
 
 
@@ -358,11 +361,11 @@ def ocr_pdf(path: Path, limit: int, max_pages: int,
             prefix = Path(temporary) / ("page-%06d" % page_number)
             image = Path(str(prefix) + ".png")
             try:
-                subprocess.run(
+                from ocr_budget import run_ocr
+                run_ocr(
                     [pdftoppm, "-f", str(page_number), "-l", str(page_number),
                      "-singlefile", "-r", "150", "-png", str(path), str(prefix)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=180, check=False,
+                    stdout=subprocess.DEVNULL, timeout=180,
                 )
             except (OSError, subprocess.SubprocessError):
                 continue
@@ -526,7 +529,7 @@ def entry_for(path: Path, root: Path, is_dir: bool, ocr_images: bool,
         stats["reused"] += 1
     full_pdf_ocr = (not is_dir and path.suffix.lower() == ".pdf"
                     and ocr_images and ocr_pdf_pages == 0)
-    should_extract = (content_budget[0] > 0 or full_pdf_ocr)
+    should_extract = (content_budget[0] > 0 or full_pdf_ocr) and os.environ.get("AI_SPACE_METADATA_ONLY") != "1"
     if (not reusable and not is_dir and stat
             and stat.st_size <= MAX_EXTRACT_FILE_SIZE and should_extract):
         extraction_limit = min(max_content, content_budget[0])
@@ -609,7 +612,9 @@ def scan_root(root: Path, ocr_images: bool, max_content: int,
         journal.record(root_item)
     state["items"] += 1
     progress[0] += 1
-    for current, directories, files in os.walk(str(root), followlinks=False):
+    def walk_error(error):
+        errors.append({"path": str(error.filename or root), "error": str(error), "phase": "directory-read"})
+    for current, directories, files in os.walk(str(root), followlinks=False, onerror=walk_error):
         if max_items > 0 and state["items"] >= max_items:
             directories[:] = []
             state["truncated"] = 1
@@ -725,7 +730,14 @@ def atomic_json_write(output: Path, payload: Dict) -> None:
             except OSError:
                 pass
             try:
-                os.link(str(output), str(backup_temporary))
+                try:
+                    os.link(str(output), str(backup_temporary))
+                except OSError as error:
+                    import errno
+                    if error.errno not in (errno.EPERM,errno.EOPNOTSUPP,errno.ENOSYS,errno.EXDEV):raise
+                    # Removable drives may not support hard links. Retain the
+                    # old snapshot via a staged copy rather than fail updates.
+                    shutil.copy2(str(output),str(backup_temporary))
                 os.replace(str(backup_temporary), str(backup))
             finally:
                 try:
@@ -889,7 +901,8 @@ def count_candidates(roots: List[Path], max_items: int,
         if max_items > 0 and count >= max_items:
             break
         count += 1  # configured root itself
-        for current, directories, files in os.walk(str(root), followlinks=False):
+        # This is an estimate; the real scan records every read failure.
+        for current, directories, files in os.walk(str(root), followlinks=False, onerror=lambda error: None):
             current_path = Path(current)
             directories[:] = sorted(
                 name for name in directories
@@ -992,25 +1005,10 @@ def dotted_value(value: object, key: str) -> object:
     return current
 
 
-def inherited_provider(provider: Dict, base_dir: Path) -> Dict:
-    path_value = provider.get("inheritFrom")
-    if not isinstance(path_value, str) or not path_value.strip():
-        return dict(provider)
-    path = Path(os.path.expandvars(path_value)).expanduser()
-    if not path.is_absolute():
-        path = base_dir / path
-    inherited = read_json(path)
-    selected = dotted_value(inherited, str(provider.get("inheritKey", "")))
-    merged = dict(selected) if isinstance(selected, dict) else {}
-    merged.update({key: value for key, value in provider.items()
-                   if key not in {"inheritFrom", "inheritKey"}})
-    return merged
-
-
 def provider_request(provider: Dict, roots: List[Path]) -> Dict:
     return {
         "query": provider.get("query", ""),
-        "roots": [str(root) for root in roots],
+        "roots": [str(root) for root in roots] if provider.get("includeRoots",False) else [],
         "limit": int(provider.get("limit", 5000)),
         "options": provider.get("options", {}),
     }
@@ -1025,20 +1023,21 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
         arguments = provider.get("arguments", [])
         if not program or not isinstance(arguments, list):
             raise ValueError("command provider requires program and arguments")
-        completed = subprocess.run(
-            [program, *[os.path.expandvars(str(value)) for value in arguments]],
-            input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.decode("utf-8", errors="ignore")[:300]
-                               or "provider command failed")
-        return json.loads(completed.stdout.decode("utf-8"))
+        import tempfile,resource
+        def output_limit():resource.setrlimit(resource.RLIMIT_FSIZE,(4*1024*1024,4*1024*1024))
+        with tempfile.TemporaryFile() as output,tempfile.TemporaryFile() as errors:
+            child=subprocess.Popen([program,*[os.path.expandvars(str(v)) for v in arguments]],stdin=subprocess.PIPE,stdout=output,stderr=errors,preexec_fn=output_limit)
+            try:child.communicate(json.dumps(request,ensure_ascii=False).encode(),timeout=timeout)
+            except BaseException:child.kill();child.wait();raise
+            output.seek(0);data=output.read(4*1024*1024+1);errors.seek(0)
+            if child.returncode:raise RuntimeError(errors.read(300).decode('utf-8',errors='replace') or 'Provider command failed or exceeded output limit')
+            if len(data)>4*1024*1024:raise ValueError('Provider response exceeds 4 MiB')
+            return json.loads(data.decode('utf-8'))
     if kind == "http":
         url = str(provider.get("url", ""))
         if not url.startswith(("http://", "https://")):
             raise ValueError("http provider requires an http(s) url")
+        if urllib.parse.urlsplit(url).scheme=="http" and urllib.parse.urlsplit(url).hostname not in {"localhost","127.0.0.1","::1"}:raise ValueError("Remote HTTP Provider requires HTTPS")
         headers = {str(key): str(value) for key, value in
                    (provider.get("headers", {}) if isinstance(provider.get("headers"), dict) else {}).items()}
         token_env = str(provider.get("tokenEnv", ""))
@@ -1052,14 +1051,14 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
             url, data=json.dumps(request, ensure_ascii=False).encode("utf-8"),
             headers=headers, method="POST",
         )
-        class NoCredentialRedirect(urllib.request.HTTPRedirectHandler):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, response_headers, newurl):
-                if sensitive:
-                    raise ValueError("authenticated provider redirects are disabled")
-                return super().redirect_request(req, fp, code, msg, response_headers, newurl)
-        opener = urllib.request.build_opener(NoCredentialRedirect())
+                raise ValueError("Provider redirects are disabled; authorize the final destination explicitly")
+        opener = urllib.request.build_opener(NoRedirect())
         with opener.open(http_request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            payload=response.read(4*1024*1024+1)
+            if len(payload)>4*1024*1024:raise ValueError("Provider response exceeds 4 MiB")
+            return json.loads(payload.decode("utf-8"))
     if kind == "dbus":
         gdbus = shutil.which("gdbus")
         if not gdbus:
@@ -1069,16 +1068,21 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
         method = str(provider.get("method", ""))
         if not service or not object_path or "." not in method:
             raise ValueError("dbus provider requires service, objectPath and method")
-        completed = subprocess.run(
-            [gdbus, "call", "--session", "--dest", service,
-             "--object-path", object_path, "--method", method,
-             json.dumps(request, ensure_ascii=False)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.decode("utf-8", errors="ignore")[:300])
-        tuple_value = ast.literal_eval(completed.stdout.decode("utf-8").strip())
+        import tempfile,resource
+        def output_limit():resource.setrlimit(resource.RLIMIT_FSIZE,(4*1024*1024,4*1024*1024))
+        with tempfile.TemporaryFile() as output,tempfile.TemporaryFile() as errors:
+            child=subprocess.Popen(
+                [gdbus, "call", "--session", "--dest", service,
+                 "--object-path", object_path, "--method", method,
+                 json.dumps(request, ensure_ascii=False)],
+                stdout=output,stderr=errors,preexec_fn=output_limit)
+            try:child.wait(timeout=timeout)
+            except BaseException:child.kill();child.wait();raise
+            output.seek(0);payload=output.read(4*1024*1024+1);errors.seek(0)
+            if child.returncode != 0:
+                raise RuntimeError(errors.read(300).decode("utf-8", errors="ignore") or "D-Bus Provider failed or exceeded output limit")
+            if len(payload)>4*1024*1024:raise ValueError("Provider response exceeds 4 MiB")
+        tuple_value = ast.literal_eval(payload.decode("utf-8").strip())
         value = tuple_value[0] if isinstance(tuple_value, tuple) and tuple_value else tuple_value
         return json.loads(value) if isinstance(value, str) else value
     raise ValueError("unknown provider type: " + kind)
@@ -1123,16 +1127,18 @@ def collect_provider_items(config_path: Path, roots: List[Path],
                            errors: List[Dict]) -> List[Dict]:
     if not config_path.is_file():
         return []
-    config = read_json(config_path)
-    providers = config.get("providers", [])
-    if not isinstance(providers, list):
-        errors.append({"path": str(config_path), "error": "providers must be an array"})
-        return []
+    from provider_policy import load_policy
+    try:
+        providers,digest=load_policy(config_path)
+        if providers and os.environ.get('AI_SPACE_PROVIDER_APPROVAL')!=digest:
+            raise ValueError('Provider capability approval required; review executable and destination before enabling')
+    except (OSError,ValueError) as error:
+        errors.append(dict(path=str(config_path),error=str(error)));return []
     result: List[Dict] = []
     for original in providers:
         if not isinstance(original, dict) or original.get("enabled", True) is False:
             continue
-        provider = inherited_provider(original, config_path.parent)
+        provider = dict(original)
         name = str(provider.get("name", provider.get("type", "provider")))
         try:
             payload = run_provider(provider, roots)
@@ -1451,6 +1457,7 @@ def main() -> int:
     parser.add_argument("--exclude-roots-json", default="[]")
     parser.add_argument("--include-extensions-json", default="[]")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--metadata-only", action="store_true", help="inventory only; never extract text or run OCR")
     parser.add_argument("--ocr-images", action="store_true")
     parser.add_argument("--ocr-pdf-pages", type=int,
                         default=MAX_OCR_PDF_PAGES,
@@ -1466,9 +1473,14 @@ def main() -> int:
     parser.add_argument("--max-total-content", type=int,
                         default=DEFAULT_MAX_TOTAL_CONTENT)
     parser.add_argument("--provider-config", default="")
+    parser.add_argument("--provider-approval", default="", help="SHA256 of explicitly approved effective Provider configuration")
     parser.add_argument("--resume-state", default="",
                         help="append-only checkpoint used by full/OCR tasks")
     args = parser.parse_args()
+    if args.provider_approval:os.environ["AI_SPACE_PROVIDER_APPROVAL"]=args.provider_approval
+    if args.metadata_only:
+        os.environ["AI_SPACE_METADATA_ONLY"] = "1"
+        args.ocr_images = False
     try:
         os.nice(19 if (args.full_rebuild or args.fast_full or args.ocr_pending) else 10)
     except OSError:

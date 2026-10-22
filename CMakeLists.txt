@@ -20,6 +20,9 @@ set(APP "${CMAKE_SOURCE_DIR}/apps/ai-space")
 add_executable(ai-space
     ${APP}/src/main.cpp ${APP}/src/AiSpaceController.cpp ${APP}/src/Migration.cpp
     ${APP}/src/SmartSpaceWidget.cpp
+    ${APP}/src/KnowledgeManagerDialog.cpp ${APP}/src/KnowledgeManagerDialog.h
+    ${APP}/src/KnowledgeFailuresDialog.cpp ${APP}/src/KnowledgeFailuresDialog.h
+    ${APP}/src/KnowledgeJobController.cpp ${APP}/src/KnowledgeJobController.h
     ${APP}/src/WindowTitleBarWidget.cpp ${APP}/src/WindowTitleBarWidget.h
     shared/desktop-launch/DesktopLaunchCompat.cpp ${APP}/resources.qrc)
 target_include_directories(ai-space PRIVATE ${APP}/src)
@@ -30,7 +33,8 @@ target_compile_definitions(ai-space PRIVATE
 target_link_libraries(ai-space PRIVATE Qt5::Widgets Qt5::DBus Qt5::Network Threads::Threads ZLIB::ZLIB)
 install(TARGETS ai-space RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS ${APP}/scripts/smart_space_indexer.py ${APP}/scripts/smart_space_knowledge.py
-    ${APP}/scripts/smart_space_extract.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
+    ${APP}/scripts/smart_space_extract.py ${APP}/scripts/legacy_ppt.py ${APP}/scripts/knowledge_library.py
+    ${APP}/scripts/knowledge_jobs.py ${APP}/scripts/ocr_budget.py ${APP}/scripts/provider_policy.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
 install(DIRECTORY ${APP}/scripts/_vendor/ DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space/_vendor
     PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
 install(FILES ${APP}/packaging/ai-space.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
@@ -40,7 +44,12 @@ install(SCRIPT ${CMAKE_BINARY_DIR}/install_desktop.cmake)
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/ai-space)
 install(DIRECTORY ${APP}/skills/ DESTINATION ${CMAKE_INSTALL_DATADIR}/ai-space/skills
     PATTERN "__pycache__" EXCLUDE)
+install(PROGRAMS ${APP}/scripts/knowledge_library.py DESTINATION ${CMAKE_INSTALL_DATADIR}/ai-space/skills/ai-space-index-query/scripts)
 if(BUILD_TESTING)
+    add_test(NAME ai-space-knowledge-library COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_knowledge_library.py -v)
+    set_tests_properties(ai-space-knowledge-library PROPERTIES TIMEOUT 90)
+    add_test(NAME ai-space-legacy-ppt COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_legacy_ppt.py -v)
+    set_tests_properties(ai-space-legacy-ppt PROPERTIES TIMEOUT 45)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     foreach(KIND indexer knowledge extract)
         add_test(NAME ai-space-${KIND} COMMAND ${Python3_EXECUTABLE} -m unittest -v tests/test_smart_space_${KIND}.py)
@@ -60,6 +69,12 @@ if(BUILD_TESTING)
                 ENVIRONMENT "QT_SCALE_FACTOR=${SCALE};QT_SCREEN_SCALE_FACTORS=1")
         endforeach()
         if(XDOTOOL)
+            add_test(NAME ai-space-failure-actions-ui COMMAND ${XVFB_RUN} -a -s "-screen 0 1920x1080x24" ${DBUS_RUN_SESSION} -- ${Python3_EXECUTABLE} ${APP}/tests/failure_actions_ui_test.py $<TARGET_FILE:ai-space>)
+            set_tests_properties(ai-space-failure-actions-ui PROPERTIES TIMEOUT 70 ENVIRONMENT "QT_SCALE_FACTOR=1;QT_SCREEN_SCALE_FACTORS=1")
+            add_test(NAME ai-space-knowledge-ui COMMAND ${XVFB_RUN} -a -s "-screen 0 2880x1800x24" ${DBUS_RUN_SESSION} -- ${Python3_EXECUTABLE} ${APP}/tests/knowledge_ui_test.py $<TARGET_FILE:ai-space>)
+            set_tests_properties(ai-space-knowledge-ui PROPERTIES TIMEOUT 70 ENVIRONMENT "QT_SCALE_FACTOR=1.5;QT_SCREEN_SCALE_FACTORS=1")
+            add_test(NAME ai-space-knowledge-concurrent-ui COMMAND ${XVFB_RUN} -a -s "-screen 0 2880x1800x24" ${DBUS_RUN_SESSION} -- ${Python3_EXECUTABLE} ${APP}/tests/knowledge_ui_test.py $<TARGET_FILE:ai-space> --build-reader)
+            set_tests_properties(ai-space-knowledge-concurrent-ui PROPERTIES TIMEOUT 70 ENVIRONMENT "QT_SCALE_FACTOR=1.5;QT_SCREEN_SCALE_FACTORS=1")
             foreach(SCALE 1 1.5 2)
                 add_test(NAME ai-space-window-ui-${SCALE} COMMAND ${XVFB_RUN} -a -s "-screen 0 2880x1800x24"
                     ${DBUS_RUN_SESSION} -- ${Python3_EXECUTABLE} ${APP}/tests/app_integration_test.py

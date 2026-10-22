@@ -28,7 +28,7 @@ protected:
         const bool hover = underMouse() || hasFocus();
         if (hover || isDown()) {
             QColor fill = m_kind == Close ? QColor(isDown() ? "#e11d48" : "#f43f5e")
-                : QColor(light ? 15 : 255, light ? 23 : 255, light ? 42 : 255, isDown() ? 38 : 22);
+                : QColor(148,163,184,isDown()?42:26);
             p.setPen(Qt::NoPen); p.setBrush(fill);
             QPainterPath path;
             if (m_kind == Close && !maximized) {

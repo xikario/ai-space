@@ -8,7 +8,7 @@ namespace WindowMetrics {
 constexpr int TitleBarHeight = 34;
 constexpr int SearchHeaderHeight = 48;
 constexpr int BottomStatusHeight = 36;
-constexpr qreal CornerRadius = 10.0;
+constexpr qreal CornerRadius = 12.0;
 }
 // Event-driven client decoration: native button accessibility and keyboard
 // interaction, with vector glyphs that remain sharp at fractional scaling.

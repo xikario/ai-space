@@ -8,6 +8,7 @@ and unsupported content are explicit, never a claim of perfect fidelity.
 import codecs
 import datetime
 import io
+import hashlib
 import os
 import posixpath
 import re
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from ocr_budget import run_ocr
 from collections import deque
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -34,7 +36,17 @@ OFFICE_SUFFIXES = frozenset(".doc .docx .wps .ppt .pptx .dps .xls .xlsx .et .odt
 IMAGE_SUFFIXES = frozenset(".jpg .jpeg .png .webp .tif .tiff .bmp .gif".split())
 SUPPORTED_SUFFIXES = TEXT_SUFFIXES | OFFICE_SUFFIXES | IMAGE_SUFFIXES | {".pdf"}
 LOG_SUMMARY_THRESHOLD = 1024 * 1024
+OCR_CACHE_LIMIT_BYTES = 512 * 1024**2
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def parser_version(path):
+    # Adding this format must not invalidate every cached document in a large
+    # existing library. Failed records with misleading suffixes retry anyway.
+    if Path(path).suffix.lower() in {'.ppt', '.dps'}:
+        from legacy_ppt import PARSER_VERSION
+        return EXTRACTOR_VERSION+'+'+PARSER_VERSION
+    return EXTRACTOR_VERSION
 
 
 def local(tag):
@@ -59,8 +71,7 @@ def natural(value):
 
 def run_to_file(arguments, output, timeout=120):
     with open(output, "wb") as handle:
-        result = subprocess.run(arguments, stdout=handle, stderr=subprocess.PIPE,
-                                timeout=timeout, check=False)
+        result = run_ocr(arguments, stdout=handle, timeout=timeout)
     if result.returncode:
         raise RuntimeError("%s failed (%s)" % (Path(arguments[0]).name, result.returncode))
 
@@ -106,6 +117,9 @@ def detect_kind(path):
 class Extraction:
     def __init__(self, path, ocr=False, progress=None):
         self.path = Path(path)
+        try:
+            initial=self.path.stat();self.source_revision=(initial.st_size,initial.st_mtime_ns)
+        except OSError:self.source_revision=None
         self.ocr = ocr
         self.progress = progress
         self.status = "complete"
@@ -329,6 +343,21 @@ class Extraction:
                         if value:
                             yield locator, value
 
+    def extract_ppt_binary(self):
+        import olefile
+        from legacy_ppt import LegacyPresentation
+        self.partial('legacy_ppt:slide_text_only')
+        found = False
+        with olefile.OleFileIO(str(self.path)) as ole:
+            for number, text in LegacyPresentation(ole).slides():
+                if text.strip():
+                    found = True
+                    yield '第 %d 页（旧版演示）' % number, text
+                else:
+                    self.partial('legacy_ppt_page_without_text:%d' % number)
+        if not found:
+            raise ValueError('旧版演示文稿中未找到可提取的文字；可能为图片型页面，请转换为 PDF 后进行 OCR')
+
     def extract_xls(self):
         import xlrd
         workbook = xlrd.open_workbook(str(self.path), on_demand=True)
@@ -480,16 +509,58 @@ class Extraction:
         if self.progress:
             self.progress(page)
 
-    def ocr_page(self, page, tmp):
+    def read_ocr_cache(self, page):
+        directory=os.environ.get("AI_SPACE_OCR_CACHE_DIR")
+        if not directory or os.environ.get("AI_SPACE_OCR_BYPASS_CACHE")=="1":return None
+        path=self.ocr_cache_path(page)
+        if path.is_file() and not path.is_symlink() and path.stat().st_size<=2*1024**2:
+            return path.read_text(encoding="utf-8")
+        return None
+
+    def ocr_cache_path(self,page):
+        info=self.path.stat()
+        if self.source_revision!=(info.st_size,info.st_mtime_ns):raise RuntimeError("source changed during OCR; cached pages not reused")
+        key=hashlib.sha256((str(self.path.resolve())+"|"+str(self.source_revision)+"|"+str(page)+"|"+EXTRACTOR_VERSION).encode()).hexdigest()
+        return Path(os.environ["AI_SPACE_OCR_CACHE_DIR"])/(key+".txt")
+
+    def save_ocr_cache(self,page,text):
+        directory=os.environ.get("AI_SPACE_OCR_CACHE_DIR")
+        if not directory or len(text.encode("utf-8"))>2*1024**2:return
+        from knowledge_library import storage_plan
+        storage_plan(directory,0,float(os.environ.get("AI_SPACE_RESERVE_GIB","2")),float(os.environ.get("AI_SPACE_MAX_GIB","32")))
+        folder=Path(directory);folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+        # A bounded page cache enables continuation within a long scanned PDF.
+        # It contains user text, lives on the selected storage disk, and never
+        # grows beyond 512 MiB. Oldest cached pages can safely be recomputed.
+        entries=sorted((p for p in folder.glob("*.txt") if re.fullmatch(r"[a-f0-9]{64}\.txt",p.name)),key=lambda p:p.stat().st_mtime_ns)
+        total=sum(p.stat().st_size for p in entries)
+        target=self.ocr_cache_path(page)
+        while entries and total+len(text.encode("utf-8"))>OCR_CACHE_LIMIT_BYTES:
+            old=entries.pop(0);total-=old.stat().st_size;old.unlink()
+        fd,temporary=tempfile.mkstemp(prefix=".page-",dir=str(folder))
+        try:
+            with os.fdopen(fd,"w",encoding="utf-8") as out:out.write(text);out.flush();os.fsync(out.fileno())
+            os.replace(temporary,target)
+        finally:
+            if os.path.exists(temporary):os.unlink(temporary)
+
+    def ocr_page(self,page,tmp):
+        cached=self.read_ocr_cache(page)
+        if cached is not None:return cached
+        result=self._ocr_page(page,tmp)
+        self.save_ocr_cache(page,result)
+        return result
+
+    def _ocr_page(self, page, tmp):
         if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
             raise RuntimeError("pdftoppm/tesseract not installed")
         prefix = Path(tmp) / "ocr-page"
         image = Path(str(prefix) + ".png")
         value = Path(tmp) / "ocr.txt"
         try:
-            result = subprocess.run(["pdftoppm", "-f", str(page), "-l", str(page),
+            result = run_ocr(["pdftoppm", "-f", str(page), "-l", str(page),
                 "-singlefile", "-r", "150", "-png", str(self.path), str(prefix)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=180, check=False)
+                stdout=subprocess.DEVNULL, timeout=180)
             if result.returncode or not image.exists():
                 raise RuntimeError("PDF page rendering failed: %d" % page)
             run_to_file(["tesseract", str(image), "stdout", "-l", "chi_sim+eng"], str(value), 120)
@@ -504,10 +575,16 @@ class Extraction:
             return
         if not shutil.which("tesseract"):
             raise RuntimeError("tesseract not installed")
+        cached=self.read_ocr_cache("image")
+        if cached is not None:
+            yield "图片全文（OCR）",cached
+            return
         with tempfile.TemporaryDirectory(prefix="smart-space-image-") as tmp:
             text = Path(tmp) / "ocr.txt"
             run_to_file(["tesseract", str(self.path), "stdout", "-l", "chi_sim+eng"], str(text), 120)
-            yield "图片全文（OCR）", text.read_text(encoding="utf-8")
+            value=text.read_text(encoding="utf-8")
+            self.save_ocr_cache("image",value)
+            yield "图片全文（OCR）", value
 
     def extract_text(self):
         with self.path.open("rb") as raw:

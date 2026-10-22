@@ -3,7 +3,10 @@
 #include <QDBusPendingCall>
 #include "SmartSpaceWidget.h"
 #include "WindowTitleBarWidget.h"
-#include "VideoWallpaperRegion.h"
+#include "KnowledgeManagerDialog.h"
+#include "KnowledgeFailuresDialog.h"
+#include "KnowledgeJobController.h"
+#include <QProcessEnvironment>
 
 #include "DesktopItem.h"
 #include <QAction>
@@ -38,6 +41,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QLinearGradient>
 #include <QListView>
@@ -71,6 +75,9 @@
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QStyle>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
+#include <QFocusEvent>
 #include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
@@ -94,6 +101,17 @@
 #if defined(__GLIBC__)
 #include <malloc.h>
 #endif
+
+class CompactKnowledgeStatus : public QLabel {
+public:
+    explicit CompactKnowledgeStatus(QWidget *parent):QLabel(parent){}
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);painter.setPen(palette().color(QPalette::WindowText));
+        const QString brief=text().simplified();
+        painter.drawText(contentsRect(),Qt::AlignVCenter|Qt::AlignLeft,fontMetrics().elidedText(brief+QStringLiteral(" · 详情 ›"),Qt::ElideRight,contentsRect().width()));
+    }
+};
 
 namespace {
 
@@ -381,6 +399,38 @@ void styleModernCombos(QWidget *root)
     }
 }
 
+// Observe delivery to child controls as well as the frameless surface. An
+// edge cursor belongs to the surface; it must not remain inherited when a
+// child consumes mouse movement. This observer never consumes input or polls.
+class WindowPointerObserver final : public QObject
+{
+public:
+    WindowPointerObserver(QWidget *window, std::function<void(QPoint)> moved)
+        : QObject(window), m_window(window), m_moved(std::move(moved))
+    {
+        qApp->installEventFilter(this);
+    }
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        const auto type = event->type();
+        if (type != QEvent::Enter && type != QEvent::MouseMove && type != QEvent::Leave)
+            return false;
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (!widget || widget->window() != m_window)
+            return false;
+        if (type == QEvent::Leave && widget != m_window)
+            return false;
+        const QPoint global = type == QEvent::MouseMove
+            ? static_cast<QMouseEvent *>(event)->globalPos() : QCursor::pos();
+        m_moved(m_window->mapFromGlobal(global));
+        return false;
+    }
+private:
+    QWidget *m_window;
+    std::function<void(QPoint)> m_moved;
+};
+
 void execMenuAt(QMenu &menu, QWidget *anchor)
 {
     if (!anchor) {
@@ -389,13 +439,18 @@ void execMenuAt(QMenu &menu, QWidget *anchor)
     }
     menu.ensurePolished();
     menu.adjustSize();
-    QPoint pos = anchor->mapToGlobal(QPoint(0, anchor->height() + 6));
-    if (QScreen *screen = QGuiApplication::screenAt(pos)) {
-        const QRect avail = screen->availableGeometry();
-        if (pos.x() + menu.width() > avail.right())
-            pos.setX(qMax(avail.left() + 4, anchor->mapToGlobal(QPoint(anchor->width(), 0)).x() - menu.width()));
-        if (pos.y() + menu.height() > avail.bottom())
-            pos.setY(qMax(avail.top() + 4, anchor->mapToGlobal(QPoint(0, 0)).y() - menu.height() - 6));
+    const QRect button(anchor->mapToGlobal(QPoint()), anchor->size());
+    // Footer actions open upward, aligned to the button's right edge.
+    QPoint pos(button.right() + 1 - menu.width(), button.top() - menu.height() - 6);
+    QScreen *screen = QGuiApplication::screenAt(button.center());
+    if (!screen)
+        screen = QGuiApplication::primaryScreen();
+    if (screen) {
+        const QRect avail = screen->availableGeometry().adjusted(4, 4, -4, -4);
+        if (pos.y() < avail.top() && button.bottom() + 6 + menu.height() <= avail.bottom())
+            pos.setY(button.bottom() + 7);
+        pos.setX(qBound(avail.left(), pos.x(), qMax(avail.left(), avail.right() + 1 - menu.width())));
+        pos.setY(qBound(avail.top(), pos.y(), qMax(avail.top(), avail.bottom() + 1 - menu.height())));
     }
     menu.exec(pos);
 }
@@ -655,6 +710,42 @@ private:
     std::function<void()> m_blankClickAction;
 };
 
+constexpr int kFolderCountRole = Qt::UserRole + 40;
+class FolderBadgeDelegate final : public QStyledItemDelegate {
+public:
+    explicit FolderBadgeDelegate(QObject *parent) : QStyledItemDelegate(parent) {}
+    void paint(QPainter *p,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        if (!index.data(kFolderCountRole).isValid()) {
+            QStyledItemDelegate::paint(p,option,index);return;
+        }
+        QStyleOptionViewItem opt(option);initStyleOption(&opt,index);
+        const QString title=opt.text;
+        const QIcon icon=opt.icon;
+        opt.text.clear();opt.icon=QIcon();
+        const QWidget *widget=opt.widget;
+        (widget?widget->style():qApp->style())->drawControl(QStyle::CE_ItemViewItem,&opt,p,widget);
+        const bool light=widget && widget->window()->property("smartLightTheme").toBool();
+        const bool selected=opt.state & QStyle::State_Selected;
+        const QColor ink=selected?QColor(light?"#4f46e5":"#a5b4fc"):opt.palette.color(QPalette::Text);
+        const QColor muted=light?QColor("#64748b"):QColor("#94a3b8");
+        p->save();p->setRenderHint(QPainter::Antialiasing);
+        const int extent=qMin(opt.decorationSize.width(),qMax(12,opt.rect.height()-10));
+        const QRect iconRect(opt.rect.left()+10,opt.rect.center().y()-extent/2,extent,extent);
+        icon.paint(p,iconRect,Qt::AlignCenter);
+        QFont badgeFont=opt.font;badgeFont.setPixelSize(10);p->setFont(badgeFont);
+        const QString count=QLocale().toString(index.data(kFolderCountRole).toInt());
+        const int badgeWidth=qMin(64,p->fontMetrics().horizontalAdvance(count)+14);
+        const int badgeHeight=qMin(20,opt.rect.height()-6);
+        const QRect badge(opt.rect.right()-badgeWidth-9,opt.rect.center().y()-badgeHeight/2,badgeWidth,badgeHeight);
+        p->setPen(Qt::NoPen);p->setBrush(selected?QColor(light?"#eef2ff":"#30395e"):QColor(light?"#e8edf3":"#1e293b"));
+        p->drawRoundedRect(badge,5,5);p->setPen(selected?ink:muted);p->drawText(badge,Qt::AlignCenter,count);
+        QFont titleFont=opt.font;titleFont.setBold(selected);p->setFont(titleFont);p->setPen(ink);
+        const QRect textRect(iconRect.right()+9,opt.rect.top(),qMax(0,badge.left()-iconRect.right()-16),opt.rect.height());
+        p->drawText(textRect,Qt::AlignVCenter|Qt::AlignLeft,p->fontMetrics().elidedText(title,Qt::ElideRight,textRect.width()));
+        p->restore();
+    }
+};
+
 class SmartFileCard final : public QWidget
 {
 public:
@@ -663,9 +754,24 @@ public:
         : QWidget(parent), m_activate(std::move(activate))
     {
         setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_StyledBackground,true);
     }
-
+    void setPreviewButton(QToolButton *button) {
+        m_preview=button;button->installEventFilter(this);updatePreviewVisibility();
+    }
+    void setSelectedState(bool selected) {
+        if (m_selected==selected) return;
+        m_selected=selected;setProperty("selected",selected);
+        style()->unpolish(this);style()->polish(this);update();updatePreviewVisibility();
+    }
 protected:
+    void enterEvent(QEvent *event) override {m_hovered=true;updatePreviewVisibility();QWidget::enterEvent(event);}
+    void leaveEvent(QEvent *event) override {m_hovered=false;updatePreviewVisibility();QWidget::leaveEvent(event);}
+    bool eventFilter(QObject *watched,QEvent *event) override {
+        if (watched==m_preview && (event->type()==QEvent::FocusIn || event->type()==QEvent::FocusOut))
+            updatePreviewVisibility(event->type()==QEvent::FocusIn);
+        return QWidget::eventFilter(watched,event);
+    }
     void mousePressEvent(QMouseEvent *event) override
     {
         if (event->button() == Qt::LeftButton) {
@@ -687,6 +793,11 @@ protected:
     }
 
 private:
+    void updatePreviewVisibility(bool focused=false) {
+        if (m_preview) m_preview->setVisible((isVisible() && rect().contains(mapFromGlobal(QCursor::pos()))) || m_hovered || m_selected || focused || m_preview->hasFocus());
+    }
+    QToolButton *m_preview=nullptr;
+    bool m_hovered=false,m_selected=false;
     std::function<void()> m_activate;
 };
 
@@ -876,21 +987,21 @@ void clearButtonLayout(QHBoxLayout *layout)
 
 } // namespace
 
-SmartSpaceWidget::SmartSpaceWidget(bool fenceEmbedded, QWidget *parent)
+SmartSpaceWidget::SmartSpaceWidget(QWidget *parent)
     : QWidget(parent)
-    , m_fenceEmbedded(fenceEmbedded)
 {
-    // Embedded mode needs an opaque backing store.  The normal desktop-child
-    // mode follows SystemMonitor: transparent corners, with every visible
-    // surface painted explicitly and clipped by a rounded mask.
-    setAttribute(Qt::WA_OpaquePaintEvent, m_fenceEmbedded);
-    setAutoFillBackground(m_fenceEmbedded);
+    setAttribute(Qt::WA_OpaquePaintEvent,false);
+    setAutoFillBackground(false);
     setMinimumSize(620, 360);
     setMouseTracking(true);
     setWindowTitle(QStringLiteral("AI空间"));
     setObjectName(QStringLiteral("smartSpaceSurface"));
 
     buildUi();
+    new WindowPointerObserver(this, [this](QPoint pos) {
+        if (!m_resizing && !m_dragging && !(QApplication::mouseButtons() & Qt::LeftButton))
+            updateResizeCursor(pos);
+    });
     restoreSettings();
     m_geometrySaveTimer.setSingleShot(true);
     m_geometrySaveTimer.setInterval(250);
@@ -904,40 +1015,7 @@ SmartSpaceWidget::SmartSpaceWidget(bool fenceEmbedded, QWidget *parent)
     updateWindowStateButtons();
     updateRoundedMask();
 
-    m_indexer = new QProcess(this);
-    connect(m_indexer, &QProcess::readyReadStandardOutput,
-            this, &SmartSpaceWidget::handleIndexerOutput);
-    connect(m_indexer, &QProcess::readyReadStandardError,
-            this, &SmartSpaceWidget::handleIndexerOutput);
-    connect(m_indexer,
-            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int code, QProcess::ExitStatus status) {
-                finishIndexing(code, static_cast<int>(status));
-            });
-    connect(m_indexer, &QProcess::errorOccurred, this,
-            [this](QProcess::ProcessError error) {
-        if (error != QProcess::FailedToStart)
-            return;
-        m_indexBusy = false;
-        m_idleFullIndex = false;
-        m_ocrBackfill = false;
-        m_idleUsesProcessGroup = false;
-        if (m_idleIndexButton) {
-            m_idleIndexButton->setText(QStringLiteral("快全量"));
-            m_idleIndexButton->setToolTip(QStringLiteral(
-                "快速全量：不启动 OCR，建立不限文件数的完整快照"));
-            m_idleIndexButton->setEnabled(true);
-        }
-        if (m_ocrIndexButton)
-            m_ocrIndexButton->setEnabled(true);
-        if (m_refreshButton)
-            m_refreshButton->setEnabled(true);
-        if (m_pauseIndexButton)
-            m_pauseIndexButton->setEnabled(false);
-        m_statusLabel->setText(QStringLiteral("索引器启动失败，请检查 Python3 和索引脚本"));
-        if (m_indexProgress)
-            m_indexProgress->hide();
-    });
+    m_jobController=new KnowledgeJobController(this);
 
     m_watcher = new QFileSystemWatcher(this);
     connect(m_watcher, &QFileSystemWatcher::directoryChanged,
@@ -966,7 +1044,7 @@ SmartSpaceWidget::SmartSpaceWidget(bool fenceEmbedded, QWidget *parent)
     } else {
         rebuildWatches();
         m_statusLabel->setText(QStringLiteral(
-            "尚未建立索引 · 点击更新按钮开始，打开组件不会自动扫描"));
+            "尚未建立索引 · 从知识库管理选择存储盘并分阶段建库"));
     }
     // Startup auto-index is a test-fixture capability only. Requiring the
     // second guard prevents a leaked variable in a real desktop session from
@@ -981,24 +1059,12 @@ SmartSpaceWidget::SmartSpaceWidget(bool fenceEmbedded, QWidget *parent)
 SmartSpaceWidget::~SmartSpaceWidget()
 {
     m_geometrySaveTimer.stop();
+    if(m_providerAuditProcess){m_providerAuditProcess->kill();m_providerAuditProcess->waitForFinished(200);}
+    if(m_knowledgeSearchProcess){m_knowledgeSearchProcess->kill();m_knowledgeSearchProcess->waitForFinished(200);}
+    if(m_libraryPreviewProcess){m_libraryPreviewProcess->kill();m_libraryPreviewProcess->waitForFinished(200);}
     saveSettings();
-    if (m_indexer && m_indexer->state() != QProcess::NotRunning) {
-        if ((m_idleFullIndex || m_ocrBackfill) && m_idleUsesProcessGroup &&
-            signalOwnedProcessGroup(m_indexer, SIGTERM)) {
-            // The helper and any OCR descendants received SIGTERM together.
-        }
-        else
-            m_indexer->terminate();
-        if (!m_indexer->waitForFinished(500))
-            m_indexer->kill();
-    }
-    if (m_knowledgeProcess &&
-        m_knowledgeProcess->state() != QProcess::NotRunning) {
-        QPointer<QProcess> process = m_knowledgeProcess;
-        terminateKnowledgeProcess(false);
-        if (process && !process->waitForFinished(500) && process)
-            terminateKnowledgeProcess(true);
-    }
+    delete m_jobController;m_jobController=nullptr;
+    m_knowledgeProcess=nullptr;
     if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
         m_previewProcess->kill();
         m_previewProcess->waitForFinished(200);
@@ -1060,7 +1126,7 @@ void SmartSpaceWidget::buildUi()
     m_header = new QWidget(m_workspacePage);
     m_header->setObjectName(QStringLiteral("smartSpaceHeader"));
     auto *headerLayout = new QVBoxLayout(m_header);
-    headerLayout->setContentsMargins(4, 5, 4, 5);
+    headerLayout->setContentsMargins(12, 6, 12, 6);
     m_header->setFixedHeight(AiSpace::WindowMetrics::SearchHeaderHeight);
     headerLayout->setSpacing(6);
 
@@ -1087,9 +1153,9 @@ void SmartSpaceWidget::buildUi()
     m_searchEdit = new QLineEdit(m_header);
     m_searchEdit->setObjectName(QStringLiteral("smartSpaceSearch"));
     m_searchEdit->setPlaceholderText(
-        QStringLiteral("搜索（空格=且；re:正则）"));
+        QStringLiteral("搜索文件与内容 · Enter 检索"));
     m_searchEdit->setToolTip(QStringLiteral(
-        "输入后点击“搜索”或按 Enter 才执行\n"
+        "输入后按 Enter 执行搜索\n"
         "空格分隔多个必须同时命中的条件，例如：宁波 pdf\n"
         "正则表达式以 re: 开头，例如：re:^宁波.*\\.pdf$"));
     m_searchEdit->setClearButtonEnabled(true);
@@ -1103,7 +1169,7 @@ void SmartSpaceWidget::buildUi()
         QStringLiteral("执行搜索（Enter）；空格表示“且”，re:表示正则"),
         QStringLiteral("accent"));
     m_searchButton->setObjectName(QStringLiteral("smartSearchButton"));
-    m_searchButton->setFixedSize(66, 36);
+    m_searchButton->hide();
 
     m_indexProgress = new QProgressBar(m_header);
     m_indexProgress->setObjectName(QStringLiteral("smartIndexProgress"));
@@ -1128,7 +1194,7 @@ void SmartSpaceWidget::buildUi()
     m_categoryCombo->addItem(QStringLiteral("表格"), QStringLiteral("spreadsheet"));
     m_categoryCombo->addItem(QStringLiteral("其他"), QStringLiteral("other"));
     m_categoryCombo->setMinimumHeight(36);
-    m_categoryCombo->setFixedWidth(140);
+    m_categoryCombo->setFixedWidth(132);
     commandRow->addWidget(m_categoryCombo);
     connect(m_categoryCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int index) {
@@ -1138,6 +1204,16 @@ void SmartSpaceWidget::buildUi()
         updateResults(true);
     });
 
+    m_sortCombo=new QComboBox(m_header);
+    m_sortCombo->setObjectName("smartSortFilter");
+    m_sortCombo->addItem(QStringLiteral("按相关度"),0);
+    m_sortCombo->addItem(QStringLiteral("按修改时间"),1);
+    m_sortCombo->addItem(QStringLiteral("按文件大小"),2);
+    m_sortCombo->setFixedWidth(146);m_sortCombo->setMinimumHeight(36);
+    commandRow->addWidget(m_sortCombo);
+    connect(m_sortCombo,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){
+        m_resultSortMode=index;saveSettings();updateResults(false);
+    });
     headerLayout->addLayout(commandRow);
 
 
@@ -1147,6 +1223,7 @@ void SmartSpaceWidget::buildUi()
     m_splitter = new QSplitter(Qt::Horizontal, this);
     m_splitter->setObjectName(QStringLiteral("smartMainSplitter"));
     m_splitter->setChildrenCollapsible(false);
+    m_splitter->setHandleWidth(10);
 
     m_folderLevelsContainer = new QWidget;
     m_folderLevelsContainer->setObjectName(QStringLiteral("smartFolderLevels"));
@@ -1166,6 +1243,13 @@ void SmartSpaceWidget::buildUi()
         QStringLiteral("smartFolderPanel"));
 
     m_fileList = createEntryList();
+    m_fileList->setObjectName("smartFileList");
+    connect(m_fileList,&QListWidget::itemSelectionChanged,this,[this]{
+        for (int row=0;row<m_fileList->count();++row) {
+            auto *item=m_fileList->item(row);
+            if (auto *card=dynamic_cast<SmartFileCard *>(m_fileList->itemWidget(item))) card->setSelectedState(item->isSelected());
+        }
+    });
     m_filePanel = createPanel(
         QStringLiteral("匹配结果"), m_fileList,
         QStringLiteral("smartFilePanel"));
@@ -1206,6 +1290,10 @@ void SmartSpaceWidget::buildUi()
     m_previewText->setObjectName(QStringLiteral("smartPreviewText"));
     m_previewText->setFrameShape(QFrame::NoFrame);
     m_previewText->setOpenExternalLinks(false);
+    m_previewText->setOpenLinks(false);
+    connect(m_previewText,&QTextBrowser::anchorClicked,this,[this](const QUrl &url){
+        if(url.scheme()==QLatin1String("aispace-next"))if(const auto *entry=entryForPath(m_previewPath))readLibraryPreview(*entry,url.path().toInt());
+    });
     m_previewStack->addWidget(m_previewText);
     auto *imageScroll = new QScrollArea(m_previewStack);
     imageScroll->setObjectName(QStringLiteral("smartPreviewImageScroll"));
@@ -1230,8 +1318,9 @@ void SmartSpaceWidget::buildUi()
     m_statusContainer->setFixedHeight(AiSpace::WindowMetrics::BottomStatusHeight);
     auto *statusRow = new QHBoxLayout(m_statusContainer);
     statusRow->setContentsMargins(10,0,4,0); statusRow->setSpacing(4);
-    m_statusLabel = new QLabel(QStringLiteral("尚未建立索引"), m_statusContainer);
+    m_statusLabel = new CompactKnowledgeStatus(m_statusContainer);
     m_statusLabel->setObjectName(QStringLiteral("smartSpaceStatus"));
+    m_statusLabel->setText(QStringLiteral("尚未建立索引"));m_statusLabel->setCursor(Qt::PointingHandCursor);m_statusLabel->setToolTip(QStringLiteral("点击查看完整状态、OCR 待处理量与资源限制"));m_statusLabel->installEventFilter(this);m_statusLabel->setFocusPolicy(Qt::StrongFocus);
     m_statusLabel->setMinimumWidth(0);
     m_statusLabel->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
     statusRow->addWidget(m_statusLabel,1);
@@ -1246,14 +1335,15 @@ void SmartSpaceWidget::buildUi()
         button->setIconSize(QSize(14,14));button->setFixedHeight(28);
         statusRow->addWidget(button);return button;
     };
-    m_idleIndexButton=createTask("database",QStringLiteral("快全量"),QStringLiteral("快速全量，不启动OCR"));
-    m_refreshButton=createTask("refresh",QStringLiteral("增量"),QStringLiteral("更新新增或变更文件"));
-    m_ocrIndexButton=createTask("ocr","OCR",QStringLiteral("识别图片与无文本层PDF"));
+    m_idleIndexButton=createTask("database",QStringLiteral("① 全量扫描"),QStringLiteral("第1步：建立文件清单，不提取正文"));
+    m_textIndexButton=createTask("refresh",QStringLiteral("② 文本建库"),QStringLiteral("第2步：按已有清单提取正文，不运行OCR"));
+    m_ocrIndexButton=createTask("ocr",QStringLiteral("③ OCR补全"),QStringLiteral("第3步：按已扫描清单识别图片与扫描PDF"));
+    m_refreshButton=createTask("refresh",QStringLiteral("增量"),QStringLiteral("在当前知识库基础上重新扫描；未变化的正文会复用，更新或删除有变化的记录"));
     m_pauseIndexButton=createTask("pause",QStringLiteral("暂停"),QStringLiteral("安全暂停当前索引"));
     m_pauseIndexButton->setEnabled(false);
-    auto *knowledgeMenuBtn=createTask("knowledge",QStringLiteral("知识库 ▾"),QStringLiteral("知识库管理"));
-    knowledgeMenuBtn->setObjectName("smartKnowledgeMenu");
-    connect(knowledgeMenuBtn,&QToolButton::clicked,this,&SmartSpaceWidget::showHeaderMenu);
+    m_knowledgeMenuButton=createTask("knowledge",QStringLiteral("知识库 ▾"),QStringLiteral("知识库管理"));
+    m_knowledgeMenuButton->setObjectName("smartKnowledgeMenu");
+    connect(m_knowledgeMenuButton,&QToolButton::clicked,this,&SmartSpaceWidget::showHeaderMenu);
     m_sizeGrip=new AspectRatioSizeGrip(this,m_statusContainer);
     m_sizeGrip->setToolTip(QStringLiteral("拖动缩放AI空间"));
     statusRow->addWidget(m_sizeGrip);
@@ -1263,33 +1353,18 @@ void SmartSpaceWidget::buildUi()
         setSettingsViewVisible(false);m_searchEdit->setFocus();m_searchEdit->selectAll();
     });
 
-    connect(m_refreshButton, &QToolButton::clicked,
-            this, &SmartSpaceWidget::startIndexing);
+    connect(m_textIndexButton,&QToolButton::clicked,this,[this]{startGuidedBuild(false,false,QStringLiteral("text"));});
+    connect(m_refreshButton,&QToolButton::clicked,this,&SmartSpaceWidget::startIndexing);
     connect(m_themeToggleButton, &QToolButton::clicked, this, [this] {
         const int nextMode = (m_themeMode == 2 ? 1 : 2);
         setSimpleTheme(nextMode);
     });
     connect(m_idleIndexButton, &QToolButton::clicked,
-            this, &SmartSpaceWidget::startIdleFullIndex);
+            this, [this]{startGuidedBuild(false,false,QStringLiteral("manifest"));});
     connect(m_ocrIndexButton, &QToolButton::clicked,
             this, &SmartSpaceWidget::startOcrIndex);
-    connect(m_pauseIndexButton, &QToolButton::clicked, this, [this] {
-        if (!m_indexer || m_indexer->state() == QProcess::NotRunning) {
-            m_statusLabel->setText(QStringLiteral("当前没有运行中的索引任务"));
-            return;
-        }
-        m_reindexPending = false;
-        if (m_idleFullIndex || m_ocrBackfill) {
-            stopIdleFullIndex();
-            return;
-        }
-        m_idleIndexCancelled = true;
-        m_statusLabel->setText(QStringLiteral("正在暂停增量索引…"));
-        m_indexer->terminate();
-        QTimer::singleShot(1500, this, [this] {
-            if (m_indexer && m_indexer->state() != QProcess::NotRunning)
-                m_indexer->kill();
-        });
+    connect(m_pauseIndexButton,&QToolButton::clicked,this,[this]{
+        if(m_libraryJobBusy){m_statusLabel->setText(QStringLiteral("正在暂停知识库任务 · 已提交内容会保留"));stopIdleFullIndex();}
     });
     connect(m_searchButton, &QToolButton::clicked,
             this, &SmartSpaceWidget::executeSearch);
@@ -1311,7 +1386,7 @@ void SmartSpaceWidget::buildUi()
     });
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this] {
         m_statusLabel->setText(QStringLiteral(
-            "搜索条件已修改 · 点击“搜索”或按 Enter 后生效"));
+            "搜索条件已修改 · 按 Enter 后生效"));
     });
     connect(m_fileList, &QListWidget::itemClicked,
             this, &SmartSpaceWidget::openFileItem);
@@ -1328,54 +1403,31 @@ void SmartSpaceWidget::buildUi()
     connect(closePreviewShortcut, &QShortcut::activated,
             this, &SmartSpaceWidget::hidePreview);
 
-    m_previewProcess = new QProcess(this);
-    m_previewProcess->setProcessChannelMode(QProcess::MergedChannels);
-    connect(m_previewProcess,
-            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int code, QProcess::ExitStatus status) {
-        if (!m_previewVisible || m_pendingPreviewImage.isEmpty())
-            return;
-        if (status == QProcess::NormalExit && code == 0 &&
-            QFileInfo::exists(m_pendingPreviewImage)) {
-            showPreviewImage(m_pendingPreviewImage);
-            prunePreviewCache();
-            return;
-        }
-        const SmartSpaceEntry *entry = entryForPath(m_previewPath);
-        if (entry) {
-            m_previewStack->setCurrentWidget(m_previewText);
-            m_previewText->setHtml(relevantSnippetHtml(*entry, 3, 56, 120));
-        }
-    });
-
     rebuildCategoryPills();
 
-    if (m_fenceEmbedded) {
-        m_actionRail->hide();
-        outer->setContentsMargins(6, 6, 6, 4);
-    }
 }
 
 void SmartSpaceWidget::applyTheme()
 {
     const bool lightMode = (m_themeMode == 2);
+    setProperty("smartLightTheme",lightMode);
     m_customOpacity = 100;
     m_customColorsEnabled = false;
 
     if (lightMode) {
-        m_surfaceColor = QColor(QStringLiteral("#f4f6fa"));
+        m_surfaceColor = QColor(QStringLiteral("#f1f5f9"));
         m_cardColor = QColor(QStringLiteral("#ffffff"));
-        m_borderColor = QColor(QStringLiteral("#dce3ed"));
+        m_borderColor = QColor(QStringLiteral("#e2e8f0"));
         m_textColor = QColor(QStringLiteral("#0f172a"));
         m_mutedColor = QColor(QStringLiteral("#64748b"));
-        m_accentColor = QColor(QStringLiteral("#2563eb"));
+        m_accentColor = QColor(QStringLiteral("#4f46e5"));
     } else {
         m_surfaceColor = QColor(QStringLiteral("#0b1120"));
-        m_cardColor = QColor(QStringLiteral("#131c31"));
-        m_borderColor = QColor(QStringLiteral("#29364d"));
+        m_cardColor = QColor(QStringLiteral("#111827"));
+        m_borderColor = QColor(QStringLiteral("#1e293b"));
         m_textColor = QColor(QStringLiteral("#f1f5f9"));
         m_mutedColor = QColor(QStringLiteral("#94a3b8"));
-        m_accentColor = QColor(QStringLiteral("#3b82f6"));
+        m_accentColor = QColor(QStringLiteral("#a5b4fc"));
     }
     setFont(QFont());
     setAttribute(Qt::WA_OpaquePaintEvent, false);
@@ -1447,7 +1499,7 @@ void SmartSpaceWidget::applyTheme()
 
     QColor hover = m_accentColor;
     hover.setAlpha(lightMode ? 14 : 32);
-    QColor fieldBg = lightMode ? QColor(255,255,255,42) : QColor(15,23,42,36);
+    QColor fieldBg = lightMode ? QColor("#f8fafc") : QColor("#1e293b");
     QColor cardBorder = m_borderColor;
     QColor accentHover = m_accentColor.darker(110);
 
@@ -1457,7 +1509,7 @@ void SmartSpaceWidget::applyTheme()
             background: transparent; border: none;
         }
         QLabel#smartBrandTitle {
-            font-size: 12px; font-weight: 600; color: %1;
+            font-size: 13px; font-weight: 700; color: %1;
         }
         QFrame#smartNavSegment {
             background: %4; border: 1px solid %3; border-radius: 16px;
@@ -1471,7 +1523,7 @@ void SmartSpaceWidget::applyTheme()
             color: %6; background: %2; font-weight: 700;
         }
         QToolButton[railAction="true"] {
-            color: %1; background: transparent; border: none;
+            color: %1; background: %2; border: 1px solid %3;
             border-radius: 7px; padding: 2px 9px; font-size: 12px; font-weight: 500;
         }
         QToolButton[railAction="true"]:hover {
@@ -1504,21 +1556,21 @@ void SmartSpaceWidget::applyTheme()
         QWidget#smartWorkspacePage { background: transparent; }
         QWidget#smartSpaceHeader { background: transparent; border: none; }
         #smartSpaceSearch {
-            color: %1; background: %2; border: 1.5px solid %3;
+            color: %1; background: %2; border: 1px solid %3;
             border-radius: 10px; padding-left: 12px; padding-right: 12px;
             font-size: 14px;
         }
-        #smartSpaceSearch:focus { border-color: %6; }
+        #smartSpaceSearch:focus { border-color: #6366f1; }
         QToolButton#smartSearchButton {
             color: white; background: %6; border: 1px solid %6;
             border-radius: 10px; font-weight: 600; font-size: 13px;
         }
         QToolButton#smartSearchButton:hover { background: %8; border-color: %8; }
-        QComboBox#smartCategoryFilter {
-            color: %1; background: %2; border: 1.5px solid %3;
+        QComboBox#smartCategoryFilter, QComboBox#smartSortFilter {
+            color: %1; background: %2; border: 1px solid %3;
             border-radius: 10px; padding-left: 12px; padding-right: 10px;
         }
-        QComboBox#smartCategoryFilter:focus { border-color: %6; }
+        QComboBox#smartCategoryFilter:focus, QComboBox#smartSortFilter:focus { border-color: #6366f1; }
         QComboBox::drop-down { width: 24px; border: none; }
         QComboBox QAbstractItemView {
             color: %1; background: %2; border: 1px solid %3; border-radius: 8px;
@@ -1526,8 +1578,9 @@ void SmartSpaceWidget::applyTheme()
             padding: 4px; outline: none;
         }
         #smartSpaceStatus { color: %5; background: transparent; border: none; padding: 3px 6px; font-size: 12px; }
-        QFrame#smartFolderPanel, QFrame#smartFilePanel, QFrame#smartPreviewPanel {
-            background: transparent; border: none; border-radius: 10px;
+        QFrame#smartFolderPanel {background: transparent; border: none;}
+        QFrame#smartFilePanel, QFrame#smartPreviewPanel {
+            background: %2; border: 1px solid %3; border-radius: 12px;
         }
         QStackedWidget#smartResultStack { background: transparent; border: none; }
         #smartPreviewTitle { color: %1; font-size: 15px; font-weight: 600; }
@@ -1540,10 +1593,10 @@ void SmartSpaceWidget::applyTheme()
         }
         QToolButton[buttonRole="quiet"]:hover { color: %1; background: %7; }
         QPushButton#smartPreviewOpen {
-            color: white; background: %6; border: 1px solid %6;
+            color: white; background: #4f46e5; border: 1px solid #4f46e5;
             border-radius: 8px; padding: 8px 16px; font-weight: 600;
         }
-        QPushButton#smartPreviewOpen:hover { background: %8; border-color: %8; }
+        QPushButton#smartPreviewOpen:hover { background: #4338ca; border-color: #4338ca; }
         QLabel[panelTitle="true"] { color: %1; font-size: 13px; font-weight: 600; }
         QLabel#smartPanelIcon { background: transparent; padding: 0; }
         QLabel#smartPanelCount {
@@ -1558,12 +1611,22 @@ void SmartSpaceWidget::applyTheme()
         QListWidget { color: %1; background: transparent; border: none; outline: none; }
         QListWidget::item { min-height: 26px; padding: 4px 6px; border-radius: 7px; }
         QListWidget::item:hover { background: %7; }
-        QListWidget::item:selected { background: %6; color: white; }
+        QListWidget::item:selected { background: %7; color: %1; }
+        QListWidget#smartRootFolderList::item, QListWidget#smartChildFolderList::item {
+            border: 1px solid transparent; border-radius: 8px; padding: 3px 4px;
+        }
+        QListWidget#smartRootFolderList::item:selected, QListWidget#smartChildFolderList::item:selected {
+            background: %2; border-color: %3; color: %6;
+        }
         QListWidget::item:disabled { color: %5; }
         QWidget#fileResultCard {
-            background: transparent; border: 1px solid transparent; border-radius: 8px;
+            background: transparent; border: 1px solid transparent; border-radius: 10px;
         }
-        QWidget#fileResultCard:hover { background: %7; border-color: %3; }
+        QWidget#fileResultCard:hover { background: %4; border-color: %3; }
+        QWidget#fileResultCard[selected="true"] {background: %7; border-color: #6366f1;}
+        QListWidget#smartFileList::item {padding: 0; border: none;}
+        QListWidget#smartFileList::item:hover, QListWidget#smartFileList::item:selected {background: transparent;}
+        QLabel[folderBadge="true"] {color: %5; background: %4; border: 1px solid %3; border-radius: 4px; padding: 1px 6px; font-size: 10px;}
         QLabel[cardName="true"] { color: %1; font-size: 13px; font-weight: 600; }
         QLabel[cardMeta="true"] { color: %5; font-size: 11px; }
         QLabel[cardSnippet="true"] { color: %5; font-size: 12px; }
@@ -1573,10 +1636,10 @@ void SmartSpaceWidget::applyTheme()
         }
         QLabel[matchLevel="medium"] { color: #f59e0b; }
         QToolButton[previewAction="true"] {
-            color: %6; background: %7; border: 1px solid transparent;
-            border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: 600;
+            color: %6; background: %7; border: none;
+            border-radius: 6px; padding: 3px 6px; font-size: 11px; font-weight: 600;
         }
-        QToolButton[previewAction="true"]:hover { color: white; background: %6; }
+        QToolButton[previewAction="true"]:hover { color: white; background: #4f46e5; }
         QToolButton[loadMoreResults="true"] {
             color: %6; background: %7; border: 1px solid %3;
             border-radius: 8px; padding: 8px 16px; font-weight: 600;
@@ -1775,12 +1838,6 @@ QWidget *SmartSpaceWidget::createPanel(const QString &title, QWidget *content,
             titleRow->addWidget(button);
             return button;
         };
-        m_sortButton = makeDensityButton(
-            QStringLiteral("排序：按相关度⌄"),
-            QStringLiteral("排序：名称命中优先，其次按内容相关度"));
-        m_sortButton->setFixedWidth(190);
-        connect(m_sortButton, &QToolButton::clicked,
-                this, &SmartSpaceWidget::showResultSortMenu);
         m_densityDownButton = makeDensityButton(
             QStringLiteral("−"), QStringLiteral("缩小文件与文件夹，显示更多内容"));
         m_densityUpButton = makeDensityButton(
@@ -1896,24 +1953,22 @@ void SmartSpaceWidget::rebuildCategoryPills()
 void SmartSpaceWidget::showHeaderMenu()
 {
     QMenu menu(this);
+    menu.setWindowTitle(QStringLiteral("知识库"));
     applyMenuTheme(&menu);
-    QAction *refresh = menu.addAction(
-        smartMenuIcon(QStringLiteral("refresh")),
-        QStringLiteral("更新索引（增量复用）"));
-    QAction *idle = menu.addAction(
-        smartMenuIcon(QStringLiteral("fast-full")),
-        m_idleFullIndex ? QStringLiteral("快速全量正在运行")
-                        : QStringLiteral("快速全量…"));
-    idle->setEnabled(!m_indexBusy);
-    QAction *ocrIndex = menu.addAction(
-        smartMenuIcon(QStringLiteral("ocr")),
-        m_ocrBackfill ? QStringLiteral("OCR 检测/补全正在运行")
-                      : QStringLiteral("OCR 检测与补全…"));
-    ocrIndex->setEnabled(!m_indexBusy);
+    QAction *idle=menu.addAction(smartMenuIcon(QStringLiteral("fast-full")),QStringLiteral("① 全量扫描 · 建立文件清单"));
+    QAction *textBuild=menu.addAction(smartMenuIcon(QStringLiteral("refresh")),QStringLiteral("② 文本建库 · 提取正文"));
+    QAction *ocrIndex=menu.addAction(smartMenuIcon(QStringLiteral("ocr")),QStringLiteral("③ OCR补全 · 图片 / 扫描 PDF"));
+    const bool taskBusy=m_libraryJobBusy || m_knowledgeProcess;
+    for(auto *action:{idle,textBuild,ocrIndex})action->setEnabled(!taskBusy);
     menu.addSeparator();
+    QAction *refresh=menu.addAction(smartMenuIcon(QStringLiteral("refresh")),QStringLiteral("增量更新 · 重新扫描并复用正文"));refresh->setEnabled(!taskBusy);
+    menu.addSeparator();
+    QAction *manager = menu.addAction(QIcon::fromTheme(QStringLiteral("folder-open")),QStringLiteral("知识库管理 / 导入与导出…"));
+    manager->setObjectName("knowledgeManagerAction");
+    connect(manager,&QAction::triggered,this,&SmartSpaceWidget::showKnowledgeManager);
     QAction *knowledgeBuild = menu.addAction(
         QIcon::fromTheme(QStringLiteral("system-search")),
-        QStringLiteral("知识库快速建库"));
+        QStringLiteral("分阶段建库向导…"));
     QAction *knowledgeStats = menu.addAction(
         QIcon::fromTheme(QStringLiteral("view-statistics")),
         QStringLiteral("查看知识库状态"));
@@ -1922,8 +1977,7 @@ void SmartSpaceWidget::showHeaderMenu()
         QStringLiteral("暂停知识库任务"));
     const bool knowledgeBusy = m_knowledgeProcess != nullptr;
     knowledgeBuild->setEnabled(!knowledgeBusy);
-    knowledgeStats->setEnabled(!knowledgeBusy &&
-                               QFileInfo::exists(knowledgeDbPath()));
+    knowledgeStats->setEnabled(true);
     knowledgeStop->setEnabled(knowledgeBusy);
     menu.addSeparator();
     QAction *settings = menu.addAction(
@@ -1934,15 +1988,12 @@ void SmartSpaceWidget::showHeaderMenu()
         QStringLiteral("关闭AI空间"));
 
     connect(refresh, &QAction::triggered, this, &SmartSpaceWidget::startIndexing);
-    connect(idle, &QAction::triggered, this, &SmartSpaceWidget::startIdleFullIndex);
+    connect(idle,&QAction::triggered,this,[this]{startGuidedBuild(false,false,QStringLiteral("manifest"));});
+    connect(textBuild,&QAction::triggered,this,[this]{startGuidedBuild(false,false,QStringLiteral("text"));});
     connect(ocrIndex, &QAction::triggered, this, &SmartSpaceWidget::startOcrIndex);
     connect(knowledgeBuild, &QAction::triggered, this,
             &SmartSpaceWidget::startKnowledgeBuild);
-    connect(knowledgeStats, &QAction::triggered, this, [this] {
-        startKnowledgeTask(QStringLiteral("stats"), {
-            QStringLiteral("--db"), knowledgeDbPath()
-        });
-    });
+    connect(knowledgeStats,&QAction::triggered,this,&SmartSpaceWidget::showKnowledgeStatus);
     connect(knowledgeStop, &QAction::triggered, this, [this] {
         if (m_knowledgeProcess) {
             m_knowledgeProcess->setProperty("userPaused", true);
@@ -1954,7 +2005,7 @@ void SmartSpaceWidget::showHeaderMenu()
     connect(settings, &QAction::triggered, this,
             &SmartSpaceWidget::showSettingsDialog);
     connect(close, &QAction::triggered, this, &SmartSpaceWidget::closeRequested);
-    execMenuAt(menu, m_moreButton);
+    execMenuAt(menu, m_knowledgeMenuButton);
 }
 
 void SmartSpaceWidget::updateResponsiveLayout()
@@ -2091,17 +2142,23 @@ void SmartSpaceWidget::restoreSettings()
         QStringLiteral("knowledgeDirectory"),
         QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
             + QStringLiteral("/ai-space/knowledge")).toString();
+    m_libraryStorageDirectory = settings.value(QStringLiteral("libraryStorageDirectory"),m_knowledgeDirectory).toString();
+    m_storageConfirmed = settings.value(QStringLiteral("storageConfirmed"),false).toBool();
+    m_storageReserveGiB = qBound(1,settings.value(QStringLiteral("storageReserveGiB"),2).toInt(),1024);
+    m_libraryQuotaGiB = qBound(1,settings.value(QStringLiteral("libraryQuotaGiB"),32).toInt(),4096);
+    m_ocrCpuPercent = qBound(5,settings.value(QStringLiteral("ocrCpuPercent"),25).toInt(),100);
+    m_ocrMemoryMiB = qBound(256,settings.value(QStringLiteral("ocrMemoryMiB"),1024).toInt(),8192);
     m_knowledgeChunkSize = qBound(600, settings.value(
         QStringLiteral("knowledgeChunkSize"), 1200).toInt(), 3000);
     m_knowledgeOverlap = qBound(0, settings.value(
         QStringLiteral("knowledgeOverlap"), 120).toInt(),
         m_knowledgeChunkSize / 3);
+    m_providerApprovedDigest=settings.value(QStringLiteral("providerApprovedDigest")).toString();
     m_providerConfig = settings.value(QStringLiteral("providerConfig"),
                                       providerConfigPath()).toString();
     const QSize storedSize = settings.value(
         QStringLiteral("size"), QSize(kDefaultWidth, kDefaultHeight)).toSize();
-    if (!m_fenceEmbedded)
-        resize(storedSize.expandedTo(minimumSize()));
+    resize(storedSize.expandedTo(minimumSize()));
     QPoint position = settings.value(QStringLiteral("position"),
                                      QPoint(-1, -1)).toPoint();
     settings.endGroup();
@@ -2117,10 +2174,8 @@ void SmartSpaceWidget::restoreSettings()
         m_densityUpButton->setToolTip(QStringLiteral("放大文件与文件夹 · 当前第 %1/%2 档")
             .arg(m_resultDensity - kMinResultDensity + 1)
             .arg(kResultDensityLevels));
-    if (m_sortButton) {
-        static const char *labels[] = {
-            "排序：按相关度⌄", "排序：按修改时间⌄", "排序：按大小⌄"};
-        m_sortButton->setText(QString::fromUtf8(labels[m_resultSortMode]));
+    if (m_sortCombo) {
+        const QSignalBlocker blocker(m_sortCombo);m_sortCombo->setCurrentIndex(m_resultSortMode);
     }
 
     const QString testRoots = QString::fromUtf8(qgetenv("AI_SPACE_ROOTS"));
@@ -2129,12 +2184,12 @@ void SmartSpaceWidget::restoreSettings()
     if (qEnvironmentVariableIsSet("AI_SPACE_OCR"))
         m_ocrImages = qEnvironmentVariableIntValue("AI_SPACE_OCR") != 0;
 
-    if (!m_fenceEmbedded && (position.x() < 0 || position.y() < 0)) {
+    if ((position.x() < 0 || position.y() < 0)) {
         const QSize area = parentWidget() ? parentWidget()->size() : QSize(1920, 1080);
         position = QPoint(48,
                           std::max(64, area.height() - height() - 100));
     }
-    if (!m_fenceEmbedded) {
+    {
         move(boundedPosition(position));
     }
 }
@@ -2198,12 +2253,19 @@ void SmartSpaceWidget::saveSettings() const
     settings.remove(QStringLiteral("defaultHidden"));
     settings.setValue(QStringLiteral("knowledgeDirectory"),
                       m_knowledgeDirectory);
+    settings.setValue(QStringLiteral("libraryStorageDirectory"),m_libraryStorageDirectory);
+    settings.setValue(QStringLiteral("storageConfirmed"),m_storageConfirmed);
+    settings.setValue(QStringLiteral("storageReserveGiB"),m_storageReserveGiB);
+    settings.setValue(QStringLiteral("libraryQuotaGiB"),m_libraryQuotaGiB);
+    settings.setValue(QStringLiteral("ocrCpuPercent"),m_ocrCpuPercent);
+    settings.setValue(QStringLiteral("ocrMemoryMiB"),m_ocrMemoryMiB);
     settings.setValue(QStringLiteral("knowledgeChunkSize"),
                       m_knowledgeChunkSize);
     settings.setValue(QStringLiteral("knowledgeOverlap"),
                       m_knowledgeOverlap);
     settings.setValue(QStringLiteral("providerConfig"), m_providerConfig);
-    if (!m_fenceEmbedded) {
+    settings.setValue(QStringLiteral("providerApprovedDigest"),m_providerApprovedDigest);
+    {
         const QRect normal = isWindowMaximized() && m_normalGeometry.isValid()
             ? m_normalGeometry : geometry();
         settings.setValue(QStringLiteral("position"),normal.topLeft());
@@ -2224,8 +2286,7 @@ bool SmartSpaceWidget::autoStartEnabled()
 
 void SmartSpaceWidget::setAutoStart(bool enabled)
 {
-    if (m_autoStart == enabled)
-        return;
+    if(m_autoStart==enabled){if(enabled)emit autoStartChanged(enabled);return;}
     m_autoStart = enabled;
     saveSettings();
     emit autoStartChanged(enabled);
@@ -2329,14 +2390,7 @@ QPoint SmartSpaceWidget::boundedPosition(const QPoint &position) const
 
 void SmartSpaceWidget::updateRoundedMask()
 {
-    if (m_fenceEmbedded) {
-        VideoWallpaperRegion::publish(this,VideoWallpaperRegion::toDevice(QRegion(rect()),devicePixelRatioF()));
-    } else {
-        const qreal radius = isWindowMaximized() ? 0.0 : 12.0;
-        VideoWallpaperRegion::publish(this, VideoWallpaperRegion::rounded(
-            QRectF(rect()), radius, devicePixelRatioF()));
-    }
-    if (m_fenceEmbedded || isWindow()) {
+    if (isWindow()) {
         // Top-level windows use an ARGB backing surface.  Keeping the
         // integer QRegion here would discard antialiased edge alpha.
         clearMask();
@@ -2349,6 +2403,8 @@ void SmartSpaceWidget::updateRoundedMask()
 
 QString SmartSpaceWidget::indexPath() const
 {
+    const QString catalog=QDir(m_knowledgeDirectory).filePath(QStringLiteral("catalog/index.json"));
+    if(QFileInfo::exists(catalog))return catalog;
     const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
     return cache + QStringLiteral("/smart-space/index.json");
 }
@@ -2419,8 +2475,13 @@ QString SmartSpaceWidget::knowledgeDbPath() const
             QStandardPaths::GenericDataLocation)
             + QStringLiteral("/ai-space/knowledge");
     }
-    return QDir(directory).filePath(
-        QStringLiteral("smart-space-knowledge.sqlite"));
+    const QString db=QDir(directory).filePath(QStringLiteral("smart-space-knowledge.sqlite"));
+    if(!QFileInfo::exists(db)) {
+        QSettings legacy(QStandardPaths::writableLocation(QStandardPaths::ConfigLocation)+QStringLiteral("/kylin/ukui-fences.ini"),QSettings::IniFormat);
+        const QString old=QDir(legacy.value(QStringLiteral("smartSpace/knowledgeDirectory"),QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)+QStringLiteral("/ukui-fences/knowledge")).toString()).filePath(QStringLiteral("smart-space-knowledge.sqlite"));
+        if(QFileInfo::exists(old))return old;
+    }
+    return db;
 }
 
 QString SmartSpaceWidget::skillDirectoryPath() const
@@ -2443,6 +2504,7 @@ QString SmartSpaceWidget::skillDirectoryPath() const
 void SmartSpaceWidget::startKnowledgeTask(
         const QString &task, const QStringList &arguments)
 {
+    if(property("knowledgeFailuresVisible").toBool()){m_statusLabel->setText(QStringLiteral("请先关闭失败项处理窗口"));return;}
     if(property("knowledgeMigrationPending").toBool()) {
         m_statusLabel->setText(QStringLiteral("旧知识库正在后台导入，当前仍可检索文件快照"));
         return;
@@ -2460,7 +2522,9 @@ void SmartSpaceWidget::startKnowledgeTask(
     m_knowledgeOutputBuffer.clear();
     m_knowledgeErrorBuffer.clear();
     m_knowledgeLastObject = QJsonObject();
-    m_knowledgeProcess = new QProcess(this);
+    setProperty("knowledgeJobStarted",QDateTime::currentDateTime());setProperty("knowledgeStage",QString());setProperty("knowledgeJobOutcome",QStringLiteral("运行中"));
+    m_knowledgeProcess=m_jobController->create();
+    if(!m_knowledgeProcess)return;
     m_knowledgeProcess->setProperty("knowledgeTask", task);
     connect(m_knowledgeProcess, &QProcess::readyReadStandardOutput,
             this, &SmartSpaceWidget::handleKnowledgeOutput);
@@ -2471,8 +2535,22 @@ void SmartSpaceWidget::startKnowledgeTask(
             this, [this](int code, QProcess::ExitStatus status) {
                 finishKnowledgeTask(code, static_cast<int>(status));
             });
-    QStringList command{worker, task};
-    command.append(arguments);
+    QStringList command;
+    if (task == QLatin1String("library")) {
+        command << QFileInfo(worker).dir().filePath(QStringLiteral("knowledge_library.py"));
+        command.append(arguments);
+    } else if (task == QLatin1String("pipeline")) {
+        command << QFileInfo(worker).dir().filePath(QStringLiteral("knowledge_jobs.py"));
+        command.append(arguments);
+    } else {
+        command << worker << task;
+        command.append(arguments);
+    }
+    if (task == QLatin1String("pipeline") || task == QLatin1String("library")) {
+        m_libraryJobBusy = true;
+        m_idleIndexButton->setEnabled(false);m_refreshButton->setEnabled(false);if(m_textIndexButton)m_textIndexButton->setEnabled(false);m_ocrIndexButton->setEnabled(false);
+        m_pauseIndexButton->setEnabled(true);
+    }
     const QString python = QStandardPaths::findExecutable(
         QStringLiteral("python3"));
     const QString setsid = QStandardPaths::findExecutable(
@@ -2493,11 +2571,11 @@ void SmartSpaceWidget::startKnowledgeTask(
             if (error != QProcess::FailedToStart || m_knowledgeProcess != startingProcess) return;
             m_statusLabel->setText(QStringLiteral("知识库后台启动失败"));
             startingProcess->deleteLater(); m_knowledgeProcess = nullptr;
+            if(m_libraryJobBusy){m_libraryJobBusy=false;m_indexProgress->hide();m_idleIndexButton->setEnabled(true);m_refreshButton->setEnabled(true);if(m_textIndexButton)m_textIndexButton->setEnabled(true);m_ocrIndexButton->setEnabled(true);m_pauseIndexButton->setEnabled(false);}
             m_knowledgeUsesProcessGroup = false;
         });
     startingProcess->start(program, processArguments);
-    if (task == QLatin1String("search") ||
-        task == QLatin1String("stats")) {
+    if (task == QLatin1String("stats")) {
         QPointer<QProcess> process = m_knowledgeProcess;
         QTimer::singleShot(30000, this, [this, process] {
             if (!process || m_knowledgeProcess != process ||
@@ -2517,47 +2595,274 @@ void SmartSpaceWidget::startKnowledgeTask(
 
 void SmartSpaceWidget::terminateKnowledgeProcess(bool force)
 {
-    if (!m_knowledgeProcess ||
-        m_knowledgeProcess->state() == QProcess::NotRunning)
-        return;
-    const bool usesProcessGroup = m_knowledgeProcess->property(
-        "usesProcessGroup").toBool();
-    const int signalNumber = force ? SIGKILL : SIGTERM;
-    if (usesProcessGroup &&
-        signalOwnedProcessGroup(m_knowledgeProcess, signalNumber))
-        return;
-    if (force)
-        m_knowledgeProcess->kill();
-    else
-        m_knowledgeProcess->terminate();
+    if(m_jobController)m_jobController->stop(force);
 }
 
-void SmartSpaceWidget::startKnowledgeBuild()
+void SmartSpaceWidget::showKnowledgeStatus()
 {
-    QDir().mkpath(QFileInfo(knowledgeDbPath()).absolutePath());
-    startKnowledgeTask(QStringLiteral("build"), {
-        QStringLiteral("--index-stream"), uiStreamIndexPath(),
-        QStringLiteral("--index-json"), indexPath(),
-        QStringLiteral("--db"), knowledgeDbPath(),
-        QStringLiteral("--chunk-size"), QString::number(m_knowledgeChunkSize),
-        QStringLiteral("--overlap"), QString::number(m_knowledgeOverlap)
+    if(property("knowledgeStatusVisible").toBool())return;
+    QDialog dialog(this,Qt::Dialog|Qt::WindowTitleHint|Qt::WindowMinimizeButtonHint|Qt::WindowCloseButtonHint);
+    dialog.setObjectName(QStringLiteral("knowledgeStatusDialog"));dialog.setWindowTitle(QStringLiteral("知识库 · 当前状态详情"));dialog.setWindowIcon(qApp->windowIcon());dialog.resize(760,630);
+    const bool light=m_themeMode==2;
+    dialog.setStyleSheet(QStringLiteral("QDialog,QPlainTextEdit{background:%1;color:%2;} QPlainTextEdit{border:0;padding:12px;} QPushButton{padding:8px 18px;background:%1;color:%2;border:1px solid #64748b;border-radius:6px;} QPushButton:disabled{color:#64748b;border-color:#64748b;}").arg(light?"#f1f5f9":"#111827",light?"#0f172a":"#e2e8f0"));
+    auto *layout=new QVBoxLayout(&dialog);auto *heading=new QLabel(QStringLiteral("知识库 · 当前状态详情"));heading->setStyleSheet(QStringLiteral("font-size:18px;font-weight:600;color:%1;padding:8px;").arg(light?"#0f172a":"#e2e8f0"));layout->addWidget(heading);auto *body=new QPlainTextEdit;body->setObjectName(QStringLiteral("knowledgeStatusDetails"));body->setReadOnly(true);layout->addWidget(body,1);
+    auto *buttons=new QHBoxLayout;auto *refresh=new QPushButton(QStringLiteral("刷新库统计"));auto *failuresButton=new QPushButton(QStringLiteral("处理失败 / 已忽略…"));failuresButton->setObjectName("knowledgeManageFailures");auto *close=new QPushButton(QStringLiteral("关闭"));buttons->addWidget(refresh);buttons->addWidget(failuresButton);buttons->addStretch();buttons->addWidget(close);layout->addLayout(buttons);connect(close,&QPushButton::clicked,&dialog,&QDialog::accept);
+    auto *process=new QProcess(&dialog);QJsonObject snapshot;QString statsMessage=QStringLiteral("正在读取库统计…");QString lastText;QDateTime sampledAt;
+    // Resolve database existence and legacy fallback in the statistics worker.
+    // A sleeping removable disk must not block the dialog's live UI refresh.
+    const QString statsWorker=QFileInfo(knowledgeWorkerPath()).dir().filePath(QStringLiteral("knowledge_library.py"));
+    failuresButton->setShortcut(QKeySequence("Alt+F"));failuresButton->setToolTip(QStringLiteral("处理失败项与已忽略项（Alt+F）"));
+    auto render=[&]{
+        const bool busy=m_libraryJobBusy;
+        QString stage=property("knowledgeStage").toString();
+        const QString phase=stage==QLatin1String("manifest")?QStringLiteral("① 全量扫描"):stage==QLatin1String("text")?QStringLiteral("② 文本建库"):stage==QLatin1String("ocr")?QStringLiteral("③ OCR 补全"):stage==QLatin1String("retry")?QStringLiteral("失败项重试"):QStringLiteral("扫描 / 库文件操作");
+        failuresButton->setEnabled(!busy && !snapshot.value("path").toString().isEmpty());
+        QStringList lines;lines<<QStringLiteral("当前情况")<<QStringLiteral("任务：%1%2").arg(busy?QStringLiteral("运行中 · ")+phase:QStringLiteral("空闲"),property("knowledgeJobOutcome").toString().isEmpty()?QString():QStringLiteral(" · 最近任务：")+property("knowledgeJobOutcome").toString())<<m_statusLabel->text();
+        if(busy){
+            const auto job=m_knowledgeLastObject;
+            if(job.contains(QStringLiteral("processed")) || job.contains(QStringLiteral("progress"))){const auto done=job.value(job.contains(QStringLiteral("processed"))?QStringLiteral("processed"):QStringLiteral("progress")).toDouble(),total=job.value(QStringLiteral("total")).toDouble();lines<<QStringLiteral("清单遍历：%1 / %2 项；尚未遍历 %3 项（含目录、跳过项和复用项，不等于待 OCR 文档）").arg(done,0,'f',0).arg(total,0,'f',0).arg(qMax(0.0,total-done),0,'f',0);}
+            if(!job.value(QStringLiteral("path")).toString().isEmpty())lines<<QStringLiteral("当前文件：")+job.value(QStringLiteral("path")).toString();
+            if(job.contains(QStringLiteral("blocks")))lines<<QStringLiteral("当前文件已提取 %1 个文本块（不是页数）").arg(job.value(QStringLiteral("blocks")).toInt());
+            const auto started=property("knowledgeJobStarted").toDateTime();if(started.isValid())lines<<QStringLiteral("本轮耗时：%1 秒").arg(started.secsTo(QDateTime::currentDateTime()));
+        }
+        lines<<QString()<<QStringLiteral("知识库统计（已提交数据%1）").arg(sampledAt.isValid()?QStringLiteral(" · ")+sampledAt.toString("HH:mm:ss"):QString());
+        if(snapshot.isEmpty())lines<<statsMessage;
+        else {
+            lines<<QStringLiteral("文档：%1　正文片段：%2　库文件：%3 GiB").arg(snapshot.value("documents").toInt()).arg(snapshot.value("chunks").toInt()).arg(snapshot.value("dbBytes").toDouble()/1073741824.0,0,'f',2);
+            const auto states=snapshot.value("extractionStates").toObject();lines<<QStringLiteral("完整：%1　部分：%2　无正文：%3　失败：%4　来源缺失：%5").arg(states.value("complete").toInt()).arg(states.value("partial").toInt()).arg(states.value("no_text").toInt()).arg(states.value("failed").toInt()).arg(states.value("missing").toInt());
+            lines<<QStringLiteral("待处理失败 / 缺失：%1　已忽略：%2（仍保留真实提取状态与已有正文）").arg(snapshot.value("failurePending").toInt()).arg(snapshot.value("ignoredDocuments").toInt());
+            lines<<QStringLiteral("最近成功建库：")+snapshot.value("lastBuild").toString();
+            const auto pending=snapshot.value("ocrPending").toObject();lines<<QString()<<QStringLiteral("OCR 阶段与剩余工作")<<QStringLiteral("当前 OCR：%1").arg(busy&&stage==QLatin1String("ocr")?QStringLiteral("正在补全"):busy&&stage==QLatin1String("retry")&&property("knowledgeRetryOcr").toBool()?QStringLiteral("重试任务按需补全"):QStringLiteral("未运行"));
+            lines<<QStringLiteral("已检测且明确待 OCR：%1 份文档（PDF %2 页、图片 %3 张）").arg(pending.value("documents").toInt()).arg(pending.value("pdfPages").toInt()).arg(pending.value("images").toInt());
+            lines<<QStringLiteral("OCR 后仍无文字的 PDF 页：%1；无正文图片：%2 张（可能本身没有文字，不自动当作待办）").arg(pending.value("emptyOcrPages").toInt()).arg(pending.value("imagesWithoutText").toInt());
+            lines<<QStringLiteral("这是已提交提取记录中的待处理量，不包含尚未检测的文件；正在处理的文档提交后才会更新。无正文不一定需要 OCR。")<<QStringLiteral("剩余总页数 / 预计耗时：尚不能可靠估算，取决于未检测 PDF 页数、图片复杂度与资源限制。");
+            lines<<QString()<<QStringLiteral("待处理失败 / 来源缺失示例（最多 20 项；通过下方按钮处理或查看已忽略项）");
+            const auto failures=snapshot.value("failures").toArray();if(failures.isEmpty())lines<<QStringLiteral("暂无记录");for(const auto &item:failures){const auto row=item.toObject();lines<<QStringLiteral("• %1：%2").arg(row.value("name").toString(),row.value("reason").toString());}
+            if(!statsMessage.isEmpty())lines<<statsMessage;
+        }
+        const QString configuredDirectory=m_knowledgeDirectory.trimmed().isEmpty()?QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)+QStringLiteral("/ai-space/knowledge"):m_knowledgeDirectory;
+        const QString displayedDb=snapshot.value("path").toString(QDir(configuredDirectory).filePath(QStringLiteral("smart-space-knowledge.sqlite")));
+        lines<<QString()<<QStringLiteral("存储与资源")<<QStringLiteral("当前个人库：")+displayedDb<<QStringLiteral("新建库位置：")+m_libraryStorageDirectory<<QStringLiteral("至少保留 %1 GiB · 单库上限 %2 GiB · OCR 单核 %3% · 工作进程地址空间 %4 MiB").arg(m_storageReserveGiB).arg(m_libraryQuotaGiB).arg(m_ocrCpuPercent).arg(m_ocrMemoryMiB);
+        const auto saved=snapshot.value("checkpoint").toObject();if(!saved.isEmpty())lines<<QStringLiteral("已完成阶段检查点：%1 · %2").arg(saved.value("stage").toString(),saved.value("completed_at").toString());
+
+        const QString text=lines.join('\n');if(text!=lastText){const int scroll=body->verticalScrollBar()->value();body->setPlainText(text);body->verticalScrollBar()->setValue(scroll);lastText=text;}
+    };
+    auto request=[&]{
+        if(process->state()!=QProcess::NotRunning)return;
+        QStringList args{statsWorker};
+        const QString currentDirectory=property("knowledgeJobDirectory").toString();
+        if(m_libraryJobBusy && !currentDirectory.isEmpty())args<<QStringLiteral("--db")<<QDir(currentDirectory).filePath(QStringLiteral("smart-space-knowledge.sqlite"));
+        args<<QStringLiteral("stats")<<QStringLiteral("--details");
+        process->start(QStandardPaths::findExecutable(QStringLiteral("python3")),args);refresh->setEnabled(false);
+    };
+    connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),&dialog,[&](int code,QProcess::ExitStatus){const auto value=QJsonDocument::fromJson(process->readAllStandardOutput()).object();if(code==0 && value.contains("documents")){snapshot=value;sampledAt=QDateTime::currentDateTime();statsMessage.clear();setProperty("knowledgeStatusLoaded",true);}else statsMessage=QStringLiteral("本次统计未完成：%1（已有数据为上次快照）").arg(value.value("error").toString());refresh->setEnabled(true);render();});
+    connect(process,&QProcess::errorOccurred,&dialog,[&](QProcess::ProcessError e){if(e==QProcess::FailedToStart){statsMessage=QStringLiteral("统计工具无法启动，请检查安装");refresh->setEnabled(true);render();}});
+    connect(failuresButton,&QPushButton::clicked,&dialog,[&]{
+        if(m_libraryJobBusy)return;
+        const QString db=snapshot.value("path").toString();if(db.isEmpty())return;
+        KnowledgeFailuresDialog failures(db,statsWorker,light,m_ocrCpuPercent,m_ocrMemoryMiB,&dialog);
+        setProperty("knowledgeFailuresVisible",true);const int action=failures.exec();setProperty("knowledgeFailuresVisible",false);
+        if(action==KnowledgeFailuresDialog::Retry){const auto ids=failures.retryIds();const bool ocr=failures.includeOcr();dialog.accept();QTimer::singleShot(0,this,[this,db,ids,ocr]{startKnowledgeRetry(db,ids,ocr);});}
+        else request();
     });
-    if (m_knowledgeProcess)
-        m_statusLabel->setText(QStringLiteral(
-            "正在建立本地知识库 · 原始索引不会被修改"));
+    QTimer timeout;timeout.setSingleShot(true);timeout.setInterval(15000);connect(process,&QProcess::started,&timeout,QOverload<>::of(&QTimer::start));connect(&timeout,&QTimer::timeout,process,&QProcess::kill);
+    QTimer live;live.setInterval(1000);connect(&live,&QTimer::timeout,&dialog,render);live.start();
+    QTimer polling;polling.setInterval(10000);connect(&polling,&QTimer::timeout,&dialog,[&]{if(m_libraryJobBusy)request();});polling.start();connect(refresh,&QPushButton::clicked,&dialog,request);
+    setProperty("knowledgeStatusVisible",true);setProperty("knowledgeStatusLoaded",false);render();request();dialog.exec();
+    live.stop();polling.stop();timeout.stop();process->disconnect(&dialog);
+    if(process->state()!=QProcess::NotRunning){
+        process->setParent(this);
+        connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),process,&QObject::deleteLater);
+        process->kill();
+    }
+    setProperty("knowledgeStatusVisible",false);
+}
+
+void SmartSpaceWidget::showKnowledgeManager()
+{
+    if(property("knowledgeFailuresVisible").toBool()){m_statusLabel->setText(QStringLiteral("请先关闭失败项处理窗口"));return;}
+    if(property("knowledgeManagerVisible").toBool()){m_statusLabel->setText(QStringLiteral("知识库向导已打开"));return;}
+    if (m_libraryJobBusy || (m_knowledgeProcess && m_knowledgeProcess->property("knowledgeTask").toString()!=QLatin1String("search"))) {
+        smartInformation(this,QStringLiteral("知识库任务正在运行"),QStringLiteral("请先等待完成，或通过暂停按钮保存进度后再管理知识库。"));return;
+    }
+    KnowledgeManagerDialog dialog(m_libraryStorageDirectory,knowledgeDbPath(),m_roots,
+        m_storageReserveGiB,m_libraryQuotaGiB,m_ocrCpuPercent,m_ocrMemoryMiB,m_themeMode==2,knowledgeWorkerPath(),this);
+    setProperty("knowledgeManagerVisible",true);
+    const int action=dialog.exec();
+    setProperty("knowledgeManagerVisible",false);
+    if(action==0 || action==KnowledgeManagerDialog::Save) {
+        // A mount/version may have changed inside the manager. Refresh the
+        // last committed query without executing text still being edited.
+        m_entries.erase(std::remove_if(m_entries.begin(),m_entries.end(),[](const SmartSpaceEntry &entry){return entry.libraryOnly;}),m_entries.end());m_libraryOnlyEntryCount=0;
+        m_knowledgeScores.clear();m_knowledgeExtractionStates.clear();m_knowledgeAvailability.clear();m_knowledgeSnippets.clear();
+        if(!m_previewPath.isEmpty() && !entryForPath(m_previewPath))hidePreview();
+        updateResults(m_scopePath.isEmpty());
+        if(!m_executedQuery.isEmpty())startKnowledgeSearch(m_executedQuery);
+    }
+    if(!action)return;
+    m_libraryStorageDirectory=dialog.directory();m_storageReserveGiB=dialog.reserveGiB();m_libraryQuotaGiB=dialog.quotaGiB();
+    m_ocrCpuPercent=dialog.ocrCpu();m_ocrMemoryMiB=dialog.ocrMemory();m_storageConfirmed=true;
+    if(action==KnowledgeManagerDialog::Build || action==KnowledgeManagerDialog::Ocr) m_roots=dialog.roots();
+    saveSettings();
+    if(action==KnowledgeManagerDialog::Build || action==KnowledgeManagerDialog::Ocr) {
+        startGuidedBuild(dialog.includeOcr(),action==KnowledgeManagerDialog::Ocr);return;
+    }
+    QStringList arguments{QStringLiteral("--db"),knowledgeDbPath()};
+    const QStringList storage{QStringLiteral("--directory"),m_libraryStorageDirectory,
+        QStringLiteral("--reserve-gib"),QString::number(m_storageReserveGiB),QStringLiteral("--max-gib"),QString::number(m_libraryQuotaGiB)};
+    if(action==KnowledgeManagerDialog::Import) {
+        const QString file=QFileDialog::getOpenFileName(this,QStringLiteral("导入只读知识库"),m_libraryStorageDirectory,QStringLiteral("AI空间知识库 (*.aikb)"));
+        if(file.isEmpty())return;
+        arguments<<QStringLiteral("import")<<QStringLiteral("--source")<<file<<QStringLiteral("--mode")<<(dialog.mountOnly()?QStringLiteral("mount"):QStringLiteral("copy"));arguments.append(storage);
+    } else if(action==KnowledgeManagerDialog::Export) {
+        QString file=QFileDialog::getSaveFileName(this,QStringLiteral("导出已提取的知识（不含原件）"),QDir(m_libraryStorageDirectory).filePath(QStringLiteral("共享知识库.aikb")),QStringLiteral("AI空间知识库 (*.aikb)"));
+        if(file.isEmpty())return;
+        if(!file.endsWith(QLatin1String(".aikb"),Qt::CaseInsensitive))file+=QStringLiteral(".aikb");
+        arguments<<QStringLiteral("export")<<QStringLiteral("--output")<<file<<QStringLiteral("--name")<<QFileInfo(file).completeBaseName();arguments.append(storage);
+    } else return;
+    if(m_knowledgeProcess) {m_knowledgeProcess->disconnect(this);terminateKnowledgeProcess(true);m_knowledgeProcess->deleteLater();m_knowledgeProcess=nullptr;}
+    startKnowledgeTask(QStringLiteral("library"),arguments);
+    m_statusLabel->setText(QStringLiteral("正在校验及处理知识库 · 大库可能需要较长时间，可暂停"));
+}
+
+void SmartSpaceWidget::startGuidedBuild(bool ocr,bool ocrOnly,const QString &singleStage,const QString &targetDirectory,bool providerApproved)
+{
+    if(!m_storageConfirmed){showKnowledgeManager();return;}
+    if(property("knowledgeManagerVisible").toBool() || property("knowledgeFailuresVisible").toBool() || m_settingsViewVisible){m_statusLabel->setText(QStringLiteral("请先关闭向导、失败项处理或设置页，再启动知识库任务"));return;}
+    if(m_providerAuditProcess){m_statusLabel->setText(QStringLiteral("正在检查数据源配置，请稍候"));return;}
+    if(!providerApproved && !m_providerConfig.isEmpty() && (QFileInfo::exists(m_providerConfig) || m_providerConfig!=providerConfigPath())){
+        auto *audit=new QProcess(this);m_providerAuditProcess=audit;
+        auto output=std::make_shared<QByteArray>();
+        connect(audit,&QProcess::readyReadStandardOutput,this,[audit,output]{output->append(audit->readAllStandardOutput());if(output->size()>262144)audit->kill();});
+        connect(audit,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),this,[=](int code,QProcess::ExitStatus){
+            if(m_providerAuditProcess==audit)m_providerAuditProcess=nullptr;audit->deleteLater();
+            const auto report=QJsonDocument::fromJson(*output).object();
+            if(code!=0 || report.value("digest").toString().isEmpty()){smartInformation(this,QStringLiteral("数据源配置不可用"),report.value("error").toString());return;}
+            const QString digest=report.value("digest").toString();const auto capabilities=report.value("capabilities").toArray();
+            if(!capabilities.isEmpty() && digest!=m_providerApprovedDigest){
+                QStringList lines{QStringLiteral("以下数据源将执行程序或联系外部服务。请核对来源后再允许；配置内容变化后会再次确认。")};
+                for(const auto &value:capabilities){const auto row=value.toObject();lines<<row.value("type").toString()+QStringLiteral(" · ")+row.value("target").toString();if(row.value("sendRootPaths").toBool())lines<<QStringLiteral("此数据源会接收资料目录路径。");}
+                if(smartQuestion(this,QStringLiteral("允许使用这些数据源？"),lines.join('\n'),QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
+            }
+            m_providerApprovedDigest=digest;saveSettings();startGuidedBuild(ocr,ocrOnly,singleStage,targetDirectory,true);
+        });
+        connect(audit,&QProcess::errorOccurred,this,[this,audit](QProcess::ProcessError error){if(error==QProcess::FailedToStart){if(m_providerAuditProcess==audit)m_providerAuditProcess=nullptr;audit->deleteLater();m_statusLabel->setText(QStringLiteral("无法检查数据源配置"));}});
+        audit->start(QStandardPaths::findExecutable(QStringLiteral("python3")),{QFileInfo(knowledgeWorkerPath()).dir().filePath(QStringLiteral("provider_policy.py")),m_providerConfig});
+        QTimer::singleShot(5000,audit,[audit]{if(audit->state()!=QProcess::NotRunning)audit->kill();});return;
+    }
+
+    if(m_libraryJobBusy){m_statusLabel->setText(QStringLiteral("知识库任务正在运行 · 请先暂停或等待完成"));return;}
+    if(m_knowledgeProcess) {m_knowledgeProcess->disconnect(this);terminateKnowledgeProcess(true);m_knowledgeProcess->deleteLater();m_knowledgeProcess=nullptr;}
+    const QString target=targetDirectory.isEmpty()?m_libraryStorageDirectory:targetDirectory;
+    if((singleStage==QLatin1String("text") || ocrOnly) && (!QFileInfo::exists(QDir(target).filePath(QStringLiteral("catalog/index.json.ui.bin.gz"))) || (ocrOnly && !QFileInfo::exists(QDir(target).filePath(QStringLiteral("smart-space-knowledge.sqlite")))))){
+        smartInformation(this,QStringLiteral("请先完成前置步骤"),ocrOnly?QStringLiteral("请先完成①全量扫描和②文本建库，再执行③OCR补全。"):QStringLiteral("请先完成①全量扫描，再执行②文本建库。"));return;
+    }
+    setProperty("knowledgeJobDirectory",target);
+    QStringList args{QStringLiteral("--directory"),target,
+        QStringLiteral("--previous-db"),knowledgeDbPath(),
+        QStringLiteral("--chunk-size"),QString::number(m_knowledgeChunkSize),QStringLiteral("--overlap"),QString::number(m_knowledgeOverlap),
+        QStringLiteral("--roots-json"),QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(m_roots)).toJson(QJsonDocument::Compact)),
+        QStringLiteral("--exclude-roots-json"),QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(m_excludedFolders)).toJson(QJsonDocument::Compact)),
+        QStringLiteral("--include-extensions-json"),QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(m_indexedExtensions)).toJson(QJsonDocument::Compact)),
+        QStringLiteral("--reserve-gib"),QString::number(m_storageReserveGiB),QStringLiteral("--max-gib"),QString::number(m_libraryQuotaGiB),
+        QStringLiteral("--ocr-cpu"),QString::number(m_ocrCpuPercent),QStringLiteral("--ocr-memory"),QString::number(m_ocrMemoryMiB)};
+    if(!m_providerConfig.isEmpty() && QFileInfo::exists(m_providerConfig))args<<QStringLiteral("--provider-config")<<m_providerConfig<<QStringLiteral("--provider-approval")<<m_providerApprovedDigest;
+    if(ocrOnly)args<<QStringLiteral("--ocr-only");else if(ocr)args<<QStringLiteral("--ocr");
+    if(singleStage==QLatin1String("manifest"))args<<QStringLiteral("--manifest-only");
+    if(singleStage==QLatin1String("text"))args<<QStringLiteral("--text-only");
+    startKnowledgeTask(QStringLiteral("pipeline"),args);
+}
+
+void SmartSpaceWidget::startKnowledgeBuild(){showKnowledgeManager();}
+
+void SmartSpaceWidget::startKnowledgeRetry(const QString &db,const QJsonArray &ids,bool ocr)
+{
+    if(ids.isEmpty() || m_libraryJobBusy || m_knowledgeProcess){m_statusLabel->setText(QStringLiteral("请等待当前任务完成后再重试"));return;}
+    const QString directory=QFileInfo(db).absolutePath();setProperty("knowledgeJobDirectory",directory);setProperty("knowledgeRetryOcr",ocr);
+    QStringList args{QStringLiteral("--directory"),directory,QStringLiteral("--retry-db"),db,QStringLiteral("--roots-json"),QStringLiteral("[]"),QStringLiteral("--retry-documents-json"),QString::fromUtf8(QJsonDocument(ids).toJson(QJsonDocument::Compact)),
+        QStringLiteral("--chunk-size"),QString::number(m_knowledgeChunkSize),QStringLiteral("--overlap"),QString::number(m_knowledgeOverlap),QStringLiteral("--reserve-gib"),QString::number(m_storageReserveGiB),QStringLiteral("--max-gib"),QString::number(m_libraryQuotaGiB),QStringLiteral("--ocr-cpu"),QString::number(m_ocrCpuPercent),QStringLiteral("--ocr-memory"),QString::number(m_ocrMemoryMiB)};
+    if(ocr)args<<QStringLiteral("--ocr");startKnowledgeTask(QStringLiteral("pipeline"),args);
 }
 
 void SmartSpaceWidget::startKnowledgeSearch(const QString &query)
 {
-    m_knowledgeScores.clear();
-    m_knowledgeSnippets.clear();
-    if (query.trimmed().isEmpty() || !QFileInfo::exists(knowledgeDbPath()))
-        return;
-    startKnowledgeTask(QStringLiteral("search"), {
-        QStringLiteral("--db"), knowledgeDbPath(),
-        QStringLiteral("--query"), query,
-        QStringLiteral("--limit"), QStringLiteral("120")
+    if(query!=m_executedQuery || m_searchUsesRegex)return;
+    ++m_knowledgeSearchRevision;
+    if(m_knowledgeSearchProcess){m_knowledgeSearchProcess->disconnect(this);m_knowledgeSearchProcess->kill();m_knowledgeSearchProcess->deleteLater();m_knowledgeSearchProcess=nullptr;}
+    if(query.trimmed().isEmpty())return;
+    const quint64 revision=m_knowledgeSearchRevision;
+    auto *process=new QProcess(this);m_knowledgeSearchProcess=process;
+    auto output=std::make_shared<QByteArray>();
+    connect(process,&QProcess::readyReadStandardOutput,this,[process,output]{
+        output->append(process->readAllStandardOutput());
+        if(output->size()>4*1024*1024){process->setProperty("oversize",true);process->kill();output->clear();}
     });
+    connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),this,[this,process,output,revision,query](int code,QProcess::ExitStatus){
+        output->append(process->readAllStandardOutput());
+        const auto data=QJsonDocument::fromJson(output->trimmed()).object();process->deleteLater();
+        if(m_knowledgeSearchProcess!=process || revision!=m_knowledgeSearchRevision || query!=m_executedQuery || m_searchUsesRegex)return;
+        m_knowledgeSearchProcess=nullptr;
+        if(code!=0 || data.isEmpty() || !data.value(QStringLiteral("error")).toString().isEmpty()) {
+            m_statusLabel->setText(process->property("oversize").toBool()?QStringLiteral("知识库返回内容过多，请使用更具体的关键词"):QStringLiteral("知识库查询未完成 · %1").arg(data.value(QStringLiteral("error")).toString().left(150)));return;
+        }
+        applyKnowledgeSearchResult(data);
+    });
+    connect(process,&QProcess::errorOccurred,this,[this,process,revision](QProcess::ProcessError error){
+        if(error==QProcess::FailedToStart){if(revision==m_knowledgeSearchRevision)m_statusLabel->setText(QStringLiteral("无法启动知识库查询工具，请检查安装"));if(m_knowledgeSearchProcess==process)m_knowledgeSearchProcess=nullptr;process->deleteLater();}
+    });
+    const QStringList args{QFileInfo(knowledgeWorkerPath()).dir().filePath(QStringLiteral("knowledge_library.py")),QStringLiteral("--db"),knowledgeDbPath(),QStringLiteral("search"),
+        QStringLiteral("--query"),query,QStringLiteral("--all"),QStringLiteral("--limit"),QStringLiteral("50"),QStringLiteral("--budget-ms"),QStringLiteral("2000")};
+    process->start(QStandardPaths::findExecutable(QStringLiteral("python3")),args);
+    QTimer::singleShot(3000,process,[process]{if(process->state()!=QProcess::NotRunning)process->kill();});
+}
+
+void SmartSpaceWidget::applyKnowledgeSearchResult(const QJsonObject &result)
+{
+    m_entries.erase(std::remove_if(m_entries.begin(),m_entries.end(),[](const SmartSpaceEntry &entry){return entry.libraryOnly;}),m_entries.end());
+    m_libraryOnlyEntryCount=0;
+    for(auto &entry:m_entries){entry.libraryReference.clear();entry.libraryDb.clear();}
+    m_knowledgeScores.clear();m_knowledgeExtractionStates.clear();m_knowledgeAvailability.clear();m_knowledgeSnippets.clear();
+    const QJsonArray rows = result.value(QStringLiteral("results")).toArray();
+    for (const QJsonValue &value : rows) {
+        const QJsonObject row = value.toObject();
+        const QString path = row.value(QStringLiteral("path")).toString();
+        if (path.isEmpty())
+            continue;
+        QString resultPath=path;
+        const QString libraryRef=row.value(QStringLiteral("reference")).toString();
+        const QString sourceDb=row.value(QStringLiteral("source_db")).toString();
+        if(!libraryRef.isEmpty() && (sourceDb!=knowledgeDbPath() || !entryForPath(path))) {
+            resultPath=libraryRef;
+            if(!entryForPath(resultPath)) {
+                SmartSpaceEntry entry;entry.libraryOnly=true;entry.path=resultPath;entry.libraryReference=libraryRef;entry.libraryDb=sourceDb;
+                entry.libraryName=row.value(QStringLiteral("library_name")).toString();entry.originalPath=path;
+                entry.libraryDocumentId=row.value(QStringLiteral("document_id")).toVariant().toLongLong();entry.libraryChunkId=row.value(QStringLiteral("chunk_id")).toVariant().toLongLong();
+                entry.name=row.value(QStringLiteral("name")).toString();entry.category=row.value(QStringLiteral("category")).toString();entry.suffix=QFileInfo(entry.name).suffix().toLower();
+                entry.root=QStringLiteral("aispace://")+row.value(QStringLiteral("library_id")).toString();entry.parentPath=entry.root;
+                entry.content=row.value(QStringLiteral("snippet")).toString();entry.size=row.value(QStringLiteral("size")).toVariant().toLongLong();entry.modified=QDateTime::fromMSecsSinceEpoch(row.value(QStringLiteral("modifiedMs")).toVariant().toLongLong());
+                m_entries.append(entry);++m_libraryOnlyEntryCount;
+            }
+        }
+        if(resultPath==path && !libraryRef.isEmpty()) {
+            for(auto &entry:m_entries)if(entry.path==path) {
+                entry.libraryReference=libraryRef;entry.libraryDb=sourceDb;entry.libraryName=row.value(QStringLiteral("library_name")).toString();entry.originalPath=path;
+                entry.libraryDocumentId=row.value(QStringLiteral("document_id")).toVariant().toLongLong();entry.libraryChunkId=row.value(QStringLiteral("chunk_id")).toVariant().toLongLong();break;
+            }
+        }
+        m_knowledgeExtractionStates.insert(resultPath,row.value(QStringLiteral("extractionStatus")).toString());
+        m_knowledgeAvailability.insert(resultPath,row.value(QStringLiteral("sourceAvailability")).toString());
+        m_knowledgeScores.insert(
+            resultPath, row.value(QStringLiteral("score")).toInt());
+        m_knowledgeSnippets.insert(
+            resultPath, row.value(QStringLiteral("snippet")).toString());
+    }
+    if(!m_previewPath.isEmpty() && !entryForPath(m_previewPath))hidePreview();
+    updateResults(m_scopePath.isEmpty());
+    const QJsonArray coverage=result.value(QStringLiteral("libraries")).toArray();int unavailable=0;
+    for(const auto &v:coverage)if(v.toObject().value(QStringLiteral("status")).toString()==QLatin1String("unavailable") || v.toObject().value(QStringLiteral("status")).toString()==QLatin1String("error"))++unavailable;
+    m_statusLabel->setText(QStringLiteral("知识库召回 %1 项%2%3").arg(m_knowledgeScores.size())
+        .arg(result.value(QStringLiteral("timed_out")).toBool()?QStringLiteral(" · 已达时间预算，可缩小关键词后重试"):QString())
+        .arg(unavailable?QStringLiteral(" · %1 个库不可用").arg(unavailable):result.value(QStringLiteral("incomplete")).toBool()?QStringLiteral(" · 查询覆盖不完整，部分文字可能超出旧索引的语言范围"):QString()));
 }
 
 void SmartSpaceWidget::handleKnowledgeOutput()
@@ -2586,14 +2891,29 @@ void SmartSpaceWidget::handleKnowledgeOutput()
             continue;
         m_knowledgeLastObject = object;
         const QString task = object.value(QStringLiteral("task")).toString();
+        if(task==QLatin1String("pipeline") && !object.value(QStringLiteral("done")).toBool()) {
+            if(object.value(QStringLiteral("phase")).toString()==QLatin1String("ready")) {const QString db=object.value(QStringLiteral("db")).toString();if(!db.isEmpty())m_knowledgeDirectory=QFileInfo(db).absolutePath();saveSettings();loadIndexAsync();}
+            const QString stage=object.value(QStringLiteral("stage")).toString();
+            if(object.value(QStringLiteral("phase")).toString()==QLatin1String("start")){setProperty("knowledgeStage",stage);m_indexProgress->hide();}
+            const QString text=stage==QLatin1String("manifest")?QStringLiteral("1/3 全量文件清单（不提取正文）"):stage==QLatin1String("text")?QStringLiteral("2/3 文本正文提取（不运行 OCR）"):stage==QLatin1String("retry")?QStringLiteral("正在重新处理选中文件（沿用资源限制，可暂停）"):QStringLiteral("3/3 受限 OCR 补全（可暂停）");
+            m_statusLabel->setText(text);
+        }
+        if(m_libraryJobBusy && !object.value(QStringLiteral("done")).toBool()) {
+            qreal completed=0,total=0;QString format;
+            if(task==QLatin1String("build")){completed=object.value(QStringLiteral("processed")).toDouble();total=object.value(QStringLiteral("total")).toDouble();format=property("knowledgeStage").toString()==QLatin1String("ocr")?QStringLiteral("OCR %p%"):QStringLiteral("正文 %p%");}
+            else if(task==QLatin1String("import")){completed=object.value(QStringLiteral("bytes")).toDouble();total=object.value(QStringLiteral("totalBytes")).toDouble();format=QStringLiteral("导入校验 %p%");}
+            else if(task==QLatin1String("export")){completed=object.value(QStringLiteral("completedPages")).toDouble();total=object.value(QStringLiteral("totalPages")).toDouble();format=QStringLiteral("导出 %p%");}
+            else if(task.isEmpty() && (object.contains(QStringLiteral("processed")) || object.contains(QStringLiteral("progress")))){completed=object.value(object.contains(QStringLiteral("processed"))?QStringLiteral("processed"):QStringLiteral("progress")).toDouble();total=object.value(QStringLiteral("total")).toDouble();format=QStringLiteral("文件清单 %p%");}
+            if(total>0){m_indexProgress->setRange(0,100);m_indexProgress->setFormat(format);m_indexProgress->setValue(qBound(0,int(completed*100.0/total),100));m_indexProgress->show();}
+        }
         if (task == QLatin1String("build") && !object.value(
                 QStringLiteral("done")).toBool()) {
             m_statusLabel->setText(QStringLiteral(
-                "知识库建库 %1/%2 · 文档 %3 · 片段 %4")
+                "%5 %1/%2 · 文档 %3 · 片段 %4")
                 .arg(object.value(QStringLiteral("processed")).toInt())
                 .arg(object.value(QStringLiteral("total")).toInt())
                 .arg(object.value(QStringLiteral("documents")).toInt())
-                .arg(object.value(QStringLiteral("chunks")).toInt()));
+                .arg(object.value(QStringLiteral("chunks")).toInt()).arg(property("knowledgeStage").toString()==QLatin1String("retry")?QStringLiteral("失败项重试"):QStringLiteral("知识库建库")));
         }
     }
 }
@@ -2613,10 +2933,12 @@ void SmartSpaceWidget::finishKnowledgeTask(int exitCode, int exitStatus)
     m_knowledgeProcess->deleteLater();
     m_knowledgeProcess = nullptr;
     m_knowledgeUsesProcessGroup = false;
+    if(m_libraryJobBusy){m_libraryJobBusy=false;m_indexProgress->hide();m_idleIndexButton->setEnabled(true);m_refreshButton->setEnabled(true);if(m_textIndexButton)m_textIndexButton->setEnabled(true);m_ocrIndexButton->setEnabled(true);m_pauseIndexButton->setEnabled(false);}
     const QJsonObject result = m_knowledgeLastObject;
     const QString error = result.value(QStringLiteral("error")).toString();
     const QString processError = QString::fromUtf8(
         m_knowledgeErrorBuffer).trimmed().left(500);
+    setProperty("knowledgeJobOutcome",userPaused?QStringLiteral("已暂停"):exitCode==0?QStringLiteral("已完成"):QStringLiteral("失败 / 已停止"));
     if (userPaused) {
         m_statusLabel->setText(QStringLiteral(
             "知识库任务已暂停 · 已完成内容已保存，下次自动续跑"));
@@ -2638,23 +2960,21 @@ void SmartSpaceWidget::finishKnowledgeTask(int exitCode, int exitStatus)
             .arg(detail));
         return;
     }
-    if (task == QLatin1String("search")) {
-        const QJsonArray rows = result.value(QStringLiteral("results")).toArray();
-        for (const QJsonValue &value : rows) {
-            const QJsonObject row = value.toObject();
-            const QString path = row.value(QStringLiteral("path")).toString();
-            if (path.isEmpty())
-                continue;
-            m_knowledgeScores.insert(
-                path, row.value(QStringLiteral("score")).toInt());
-            m_knowledgeSnippets.insert(
-                path, row.value(QStringLiteral("snippet")).toString());
+    if(task==QLatin1String("pipeline")) {
+        if(result.value("phase").toString()==QLatin1String("retry-complete")){
+            m_statusLabel->setText(QStringLiteral("重试完成 · %1 项 · %2 项仍失败 / 缺失 · 点击查看详情").arg(result.value("retried").toInt()).arg(result.value("retryFailures").toInt()));if(!m_executedQuery.isEmpty())startKnowledgeSearch(m_executedQuery);return;
         }
-        updateResults(true);
-        m_statusLabel->setText(QStringLiteral(
-            "混合检索完成 · 本地知识库召回 %1 个候选")
-            .arg(m_knowledgeScores.size()));
-        return;
+        if(m_reindexPending && m_indexMode==1){m_reindexPending=false;QTimer::singleShot(2000,this,&SmartSpaceWidget::startIndexing);}
+        if(result.value(QStringLiteral("phase")).toString()==QLatin1String("manifest-complete")){m_statusLabel->setText(QStringLiteral("① 扫描完成 · 请继续②文本建库"));return;}
+        const QString completedDb=result.value(QStringLiteral("db")).toString();
+        if(!completedDb.isEmpty())m_knowledgeDirectory=QFileInfo(completedDb).absolutePath();
+        saveSettings();loadIndexAsync();
+        const auto states=result.value(QStringLiteral("extractionStates")).toObject();
+        m_statusLabel->setText(QStringLiteral("建库完成 · %1 文档 · %2 部分提取 · %3 失败 · 点击查看详情").arg(result.value(QStringLiteral("documents")).toInt()).arg(states.value(QStringLiteral("partial")).toInt()).arg(states.value(QStringLiteral("failed")).toInt()));return;
+    }
+    if(task==QLatin1String("library")) {
+        m_statusLabel->setText(QStringLiteral("知识库导入 / 导出完成 · 外来库只读挂载，无需重新扫描"));
+        if(!m_executedQuery.isEmpty())startKnowledgeSearch(m_executedQuery);return;
     }
     if (task == QLatin1String("build")) {
         m_statusLabel->setText(QStringLiteral(
@@ -2689,7 +3009,10 @@ QStringList SmartSpaceWidget::defaultRoots() const
 
 void SmartSpaceWidget::startIndexing()
 {
-    launchIndexer(false);
+    if(!m_storageConfirmed){if(qobject_cast<QTimer *>(sender()))return;showKnowledgeManager();return;}
+    if(property("knowledgeManagerVisible").toBool() || property("knowledgeFailuresVisible").toBool() || m_settingsViewVisible){if(!qobject_cast<QTimer *>(sender()))m_statusLabel->setText(QStringLiteral("请先关闭向导、失败项处理或设置页再启动增量更新"));return;}
+    const QString current=QFileInfo(knowledgeDbPath()).absolutePath();
+    startGuidedBuild(false,false,QString(),QFileInfo::exists(knowledgeDbPath())?current:m_libraryStorageDirectory);
 }
 
 void SmartSpaceWidget::showSettings()
@@ -2712,378 +3035,13 @@ void SmartSpaceWidget::excludeFolder(const QString &path)
     excludeFolderFromIndex(path);
 }
 
-void SmartSpaceWidget::startIdleFullIndex()
-{
-    if (m_idleFullIndex && m_indexer &&
-        m_indexer->state() != QProcess::NotRunning) {
-        m_statusLabel->setText(QStringLiteral(
-            "快速全量正在运行 · 如需中断请点击左侧“暂停”"));
-        return;
-    }
-    if (m_indexer && m_indexer->state() != QProcess::NotRunning) {
-        smartInformation(this, QStringLiteral("索引任务正在运行"),
-            QStringLiteral("请等待当前索引完成后再启动快速全量。"));
-        return;
-    }
-    const bool canResume = QFileInfo::exists(resumeIndexPath());
-    const QString operation = canResume
-        ? QStringLiteral("将从上次快速全量断点继续。")
-        : QStringLiteral("将建立所有已配置目录的快速全量索引。");
-    if (qEnvironmentVariableIntValue("UKUI_FENCES_TEST_CONFIRM_IDLE") != 1 &&
-        smartQuestion(this, QStringLiteral("快速全量索引"),
-            operation + QStringLiteral(
-                           "\n\n本次不限文件数，但不启动 Tesseract OCR。"
-                           "可直接读取的 PDF/Office/WPS 正文会正常提取；"
-                           "PDF 和图片会标记为“待检测/OCR”。"
-                           "\n\n完成后可用左侧 OCR 按钮低优先级补全。是否开始？"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
-        return;
-    }
-    launchIndexer(true, false);
-}
-
-void SmartSpaceWidget::startOcrIndex()
-{
-    if (m_indexer && m_indexer->state() != QProcess::NotRunning) {
-        smartInformation(this, QStringLiteral("索引任务正在运行"),
-            QStringLiteral("请等待当前任务完成，或先点击“暂停”。"));
-        return;
-    }
-    if (!QFileInfo::exists(indexPath())) {
-        m_statusLabel->setText(QStringLiteral("请先运行“快全量”建立待检测/OCR 队列"));
-        return;
-    }
-    if (!m_ocrImages) {
-        m_statusLabel->setText(QStringLiteral(
-            "OCR 补全已在设置中关闭 · 请先启用 Tesseract OCR"));
-        return;
-    }
-    const bool canResume = QFileInfo::exists(ocrResumeIndexPath());
-    const QString detail = canResume
-        ? QStringLiteral("将从上次 OCR 断点继续。")
-        : QStringLiteral("先检测所有候选 PDF 的文本层，仅将图片和无文本层 PDF 交给 OCR。");
-    if (qEnvironmentVariableIntValue("UKUI_FENCES_TEST_CONFIRM_OCR") != 1 &&
-        smartQuestion(this, QStringLiteral("OCR 检测与补全"),
-            detail + QStringLiteral(
-                "\n\nPDF 会逐页识别，任务使用最低 CPU/I/O 优先级，"
-                "可随时暂停，已完成文件会保留在断点中。是否开始？"),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No) != QMessageBox::Yes) {
-        return;
-    }
-    launchIndexer(false, true);
-}
+void SmartSpaceWidget::startIdleFullIndex(){if(!m_storageConfirmed)showKnowledgeManager();else startGuidedBuild(false);}
+void SmartSpaceWidget::startOcrIndex(){if(!m_storageConfirmed)showKnowledgeManager();else startGuidedBuild(false,true);}
 
 void SmartSpaceWidget::stopIdleFullIndex()
 {
-    if (!m_indexer || m_indexer->state() == QProcess::NotRunning)
-        return;
-    m_idleIndexCancelled = true;
-    m_statusLabel->setText(QStringLiteral("正在中断索引并保留断点…"));
-    if (m_indexProgress)
-        m_indexProgress->setToolTip(QStringLiteral("正在安全中断；已完成的文件会用于下次续扫"));
-    if (!m_idleUsesProcessGroup ||
-        !signalOwnedProcessGroup(m_indexer, SIGTERM))
-        m_indexer->terminate();
-    const qint64 pid = m_indexer->processId();
-    const bool processGroup = m_idleUsesProcessGroup;
-    QTimer::singleShot(1500, this, [this, pid, processGroup] {
-        if (!m_indexer || m_indexer->state() == QProcess::NotRunning)
-            return;
-        // QProcess is reused for later index jobs. An old pause timer must
-        // never terminate a new job that happened to start meanwhile.
-        if (m_indexer->processId() != pid)
-            return;
-        if (!processGroup ||
-            !signalOwnedProcessGroup(m_indexer, SIGKILL))
-            m_indexer->kill();
-    });
-}
-
-void SmartSpaceWidget::launchIndexer(bool fastFull, bool ocrBackfill)
-{
-    if (!m_indexer)
-        return;
-    if (m_indexer->state() != QProcess::NotRunning) {
-        if (!m_idleFullIndex && !m_ocrBackfill)
-            m_reindexPending = true;
-        return;
-    }
-    m_reindexPending = false;
-    const QString script = indexerPath();
-    const QString python = QStandardPaths::findExecutable(QStringLiteral("python3"));
-    if (script.isEmpty() || python.isEmpty()) {
-        m_statusLabel->setText(QStringLiteral("索引器不可用：未找到 Python3 或索引脚本"));
-        return;
-    }
-
-    QJsonArray rootArray;
-    for (const QString &root : m_roots) {
-        if (QDir(root).exists())
-            rootArray.append(root);
-    }
-    if (rootArray.isEmpty()) {
-        m_statusLabel->setText(QStringLiteral("请先配置至少一个索引目录"));
-        return;
-    }
-
-    QDir().mkpath(QFileInfo(indexPath()).absolutePath());
-    QStringList arguments;
-    arguments << script
-              << QStringLiteral("--roots-json")
-              << QString::fromUtf8(QJsonDocument(rootArray).toJson(QJsonDocument::Compact))
-              << QStringLiteral("--exclude-roots-json")
-              << QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(
-                     m_excludedFolders)).toJson(QJsonDocument::Compact))
-              << QStringLiteral("--include-extensions-json")
-              << QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(
-                     m_indexedExtensions)).toJson(QJsonDocument::Compact))
-              << QStringLiteral("--output") << indexPath();
-    if (fastFull) {
-        arguments << QStringLiteral("--fast-full")
-                  << QStringLiteral("--resume-state") << resumeIndexPath();
-    } else if (ocrBackfill) {
-        arguments << QStringLiteral("--ocr-pending")
-                  << QStringLiteral("--ocr-images")
-                  << QStringLiteral("--ocr-pdf-pages") << QStringLiteral("0")
-                  << QStringLiteral("--resume-state") << ocrResumeIndexPath();
-    }
-    arguments << QStringLiteral("--no-tags");
-    arguments << QStringLiteral("--max-items")
-              // All modes must preserve the complete snapshot.  A bounded
-              // incremental pass previously replaced a 93k full index with
-              // its first 25k entries and made completed OCR appear lost.
-              << QStringLiteral("0")
-              << QStringLiteral("--max-content")
-              << QString::number(ocrBackfill ? qMin(m_maxContentPerFile, 4000)
-                              : fastFull ? qMax(m_maxContentPerFile, 12000)
-                                         : m_maxContentPerFile)
-              << QStringLiteral("--max-total-content")
-              << QString::number((ocrBackfill ? qMax(m_maxTotalContentMb, 256)
-                              : fastFull ? qMax(m_maxTotalContentMb, 32)
-                                         : qMax(m_maxTotalContentMb, 64)) *
-                                 1024 * 1024);
-    if (!m_providerConfig.trimmed().isEmpty() && QFileInfo::exists(m_providerConfig))
-        arguments << QStringLiteral("--provider-config") << m_providerConfig;
-
-    m_indexBusy = true;
-    m_idleFullIndex = fastFull;
-    m_ocrBackfill = ocrBackfill;
-    m_idleIndexCancelled = false;
-    m_idleUsesProcessGroup = false;
-    m_indexOutputBuffer.clear();
-    m_indexProcessed = 0;
-    m_indexTotal = 0;
-    if (m_idleIndexButton) {
-        m_idleIndexButton->setText(QStringLiteral("快全量"));
-        m_idleIndexButton->setEnabled(false);
-    }
-    if (m_refreshButton)
-        m_refreshButton->setEnabled(false);
-    if (m_ocrIndexButton)
-        m_ocrIndexButton->setEnabled(false);
-    if (m_pauseIndexButton)
-        m_pauseIndexButton->setEnabled(true);
-    m_statusLabel->setText(fastFull
-        ? QStringLiteral("快速全量已启动 · 文件数不限 · 不启动 OCR")
-        : ocrBackfill
-            ? QStringLiteral("正在低优先级检测 PDF 文本层…")
-            : QStringLiteral("正在快速增量索引…"));
-    if (m_indexProgress)
-    {
-        m_indexProgress->setRange(0, 0);
-        m_indexProgress->setValue(0);
-        m_indexProgress->setFormat(QStringLiteral("正在统计待索引文件…"));
-        m_indexProgress->setToolTip(QStringLiteral("正在统计待索引文件…"));
-        m_indexProgress->show();
-    }
-
-    QString program = python;
-    QStringList processArguments = arguments;
-    if (fastFull || ocrBackfill) {
-        QStringList wrapped;
-        const QString ionice = QStandardPaths::findExecutable(QStringLiteral("ionice"));
-        if (!ionice.isEmpty())
-            wrapped << ionice << QStringLiteral("-c") << QStringLiteral("3");
-        wrapped << python;
-        wrapped.append(arguments);
-        const QString setsid = QStandardPaths::findExecutable(QStringLiteral("setsid"));
-        if (!setsid.isEmpty()) {
-            program = setsid;
-            processArguments = wrapped;
-            m_idleUsesProcessGroup = true;
-        } else if (!ionice.isEmpty()) {
-            program = ionice;
-            processArguments.clear();
-            processArguments << QStringLiteral("-c") << QStringLiteral("3") << python;
-            processArguments.append(arguments);
-        }
-    }
-    m_indexer->start(program, processArguments);
-}
-
-void SmartSpaceWidget::handleIndexerOutput()
-{
-    m_indexOutputBuffer.append(m_indexer->readAllStandardOutput());
-    m_indexer->readAllStandardError();
-    int newline = -1;
-    while ((newline = m_indexOutputBuffer.indexOf('\n')) >= 0) {
-        const QByteArray line = m_indexOutputBuffer.left(newline);
-        m_indexOutputBuffer.remove(0, newline + 1);
-        const QJsonObject object = QJsonDocument::fromJson(line).object();
-        if (object.value(QStringLiteral("phase")).toString() ==
-            QLatin1String("counting")) {
-            if (m_indexProgress) {
-                m_indexProgress->setRange(0, 0);
-                m_indexProgress->setFormat(QStringLiteral("正在统计待索引文件…"));
-                m_indexProgress->setToolTip(QStringLiteral("正在统计待索引文件…"));
-            }
-            continue;
-        }
-        if (object.contains(QStringLiteral("resuming"))) {
-            const int saved = object.value(QStringLiteral("resuming")).toInt();
-            const int preflight = object.value(
-                QStringLiteral("resumePreflight")).toInt();
-            const int ocrCompleted = object.value(
-                QStringLiteral("resumeOcrCompleted")).toInt();
-            m_statusLabel->setText(m_ocrBackfill
-                ? QStringLiteral("OCR 断点续扫 · 已完成 %1 项 · 已检测 %2 项 · 复用 %3 条记录")
-                    .arg(ocrCompleted).arg(preflight).arg(saved)
-                : QStringLiteral("发现索引断点 · 将复用 %1 个已完成项后继续")
-                    .arg(saved));
-            continue;
-        }
-        if (object.contains(QStringLiteral("progress"))) {
-            const QString phase = object.value(QStringLiteral("phase")).toString();
-            const int page = object.value(QStringLiteral("page")).toInt();
-            const int pages = object.value(QStringLiteral("pages")).toInt();
-            m_indexProcessed = object.value(QStringLiteral("progress")).toInt();
-            if (object.contains(QStringLiteral("total")))
-                m_indexTotal = object.value(QStringLiteral("total")).toInt();
-            if (m_indexProgress && m_indexTotal > 0) {
-                m_indexProgress->setRange(0, m_indexTotal);
-                m_indexProgress->setValue(qMin(m_indexProcessed, m_indexTotal));
-                if (phase == QLatin1String("ocr-preflight"))
-                    m_indexProgress->setFormat(QStringLiteral("检测文本层   %p%   %v / %m"));
-                else if (phase == QLatin1String("ocr-pages") && pages > 0)
-                    m_indexProgress->setFormat(QStringLiteral(
-                        "OCR %1 / %2 项   PDF %3 / %4 页")
-                        .arg(m_indexProcessed).arg(m_indexTotal)
-                        .arg(page).arg(pages));
-                else
-                    m_indexProgress->setFormat(m_ocrBackfill
-                        ? QStringLiteral("OCR 总进度   %p%   %v / %m 项")
-                        : QStringLiteral("%p%   %v / %m 项"));
-                const int percent = qBound(0,
-                    qRound(m_indexProcessed * 100.0 / m_indexTotal), 100);
-                const QString currentPath = object.value(
-                    QStringLiteral("path")).toString();
-                const QString operation = phase == QLatin1String("ocr-preflight")
-                    ? QStringLiteral("检测 PDF 文本层")
-                    : phase == QLatin1String("ocr-pages")
-                        ? QStringLiteral("OCR 页进度 %1 / %2").arg(page).arg(pages)
-                        : QStringLiteral("索引进度 %1%").arg(percent);
-                m_indexProgress->setToolTip(QStringLiteral(
-                    "%1 · %2 / %3%4")
-                    .arg(operation).arg(m_indexProcessed).arg(m_indexTotal)
-                    .arg(currentPath.isEmpty() ? QString()
-                        : QStringLiteral("\n当前文件：%1").arg(currentPath)));
-                if (m_indexProgress->underMouse()) {
-                    QToolTip::showText(
-                        m_indexProgress->mapToGlobal(
-                            QPoint(m_indexProgress->width() / 2,
-                                   m_indexProgress->height() + 4)),
-                        m_indexProgress->toolTip(), m_indexProgress);
-                }
-            }
-            if (m_indexProcessed == 0 && phase != QLatin1String("ocr-running") &&
-                phase != QLatin1String("ocr-pages"))
-                continue;
-            m_statusLabel->setText(m_ocrBackfill
-                ? (phase == QLatin1String("ocr-preflight")
-                    ? QStringLiteral("正在检测 PDF 文本层 · %1 / %2 · 此阶段不运行 OCR")
-                        .arg(m_indexProcessed).arg(m_indexTotal)
-                    : phase == QLatin1String("ocr-pages")
-                        ? QStringLiteral("OCR 图片型 PDF · 第 %1 / %2 页 · 文件 %3 / %4")
-                            .arg(page).arg(pages)
-                            .arg(m_indexProcessed + 1).arg(m_indexTotal)
-                        : QStringLiteral("OCR 图片/扫描 PDF · %1 / %2 项")
-                            .arg(m_indexProcessed).arg(m_indexTotal))
-                : m_idleFullIndex
-                    ? QStringLiteral("快速全量 · %1 / %2 项 · 未启动 OCR")
-                        .arg(m_indexProcessed).arg(m_indexTotal)
-                    : QStringLiteral("快速增量…%1 / %2 项")
-                        .arg(m_indexProcessed).arg(m_indexTotal));
-        }
-    }
-    // A valid progress record is one bounded JSON line.  If a broken helper
-    // writes an unterminated stream, never let that partial line grow for the
-    // entire lifetime of the desktop process.
-    constexpr int kMaxPartialIndexerLine = 1024 * 1024;
-    if (m_indexOutputBuffer.size() > kMaxPartialIndexerLine) {
-        m_indexOutputBuffer.clear();
-        m_statusLabel->setText(QStringLiteral(
-            "索引器返回了异常长的状态记录 · 已丢弃该条，索引任务继续"));
-    }
-}
-
-void SmartSpaceWidget::finishIndexing(int exitCode, int exitStatus)
-{
-    const bool wasIdleFull = m_idleFullIndex;
-    const bool wasOcrBackfill = m_ocrBackfill;
-    const bool wasCancelled = m_idleIndexCancelled;
-    m_indexBusy = false;
-    m_idleFullIndex = false;
-    m_ocrBackfill = false;
-    m_idleUsesProcessGroup = false;
-    if (m_indexProgress)
-        m_indexProgress->hide();
-    if (m_idleIndexButton) {
-        m_idleIndexButton->setText(QStringLiteral("快全量"));
-        m_idleIndexButton->setToolTip(QStringLiteral(
-            "快速全量：文件数不限，不启动 OCR，待检测/OCR 文件单独标记"));
-        m_idleIndexButton->setEnabled(true);
-    }
-    if (m_refreshButton)
-        m_refreshButton->setEnabled(true);
-    if (m_ocrIndexButton)
-        m_ocrIndexButton->setEnabled(true);
-    if (m_pauseIndexButton)
-        m_pauseIndexButton->setEnabled(false);
-    if (exitStatus == static_cast<int>(QProcess::NormalExit) &&
-        exitCode == 0 && QFileInfo::exists(indexPath())) {
-        const bool loaded = loadIndex();
-        if (!loaded) {
-            m_idleIndexCancelled = false;
-            return;
-        }
-        const int pendingOcr = std::count_if(
-            m_entries.cbegin(), m_entries.cend(),
-            [](const SmartSpaceEntry &entry) {
-                return entry.ocrStatus == QLatin1String("pending");
-            });
-        if (wasOcrBackfill)
-            m_statusLabel->setText(QStringLiteral(
-                "OCR 补全完成 · 索引共 %1 项 · 剩余待 OCR %2 项")
-                .arg(m_entries.size()).arg(pendingOcr));
-        else if (wasIdleFull)
-            m_statusLabel->setText(QStringLiteral(
-                "快速全量完成 · 已索引 %1 项 · 待检测/OCR %2 项")
-                .arg(m_entries.size()).arg(pendingOcr));
-    } else if ((wasIdleFull || wasOcrBackfill) && wasCancelled) {
-        m_statusLabel->setText(QStringLiteral(
-            "%1已暂停 · 正式索引保持不变 · 下次自动续扫")
-            .arg(wasOcrBackfill ? QStringLiteral("OCR")
-                                : QStringLiteral("快速全量")));
-    } else if (!wasIdleFull && !wasOcrBackfill && wasCancelled) {
-        m_statusLabel->setText(QStringLiteral(
-            "增量索引已暂停 · 现有索引保持不变"));
-    } else {
-        m_statusLabel->setText(QStringLiteral("索引失败，请检查目录权限或索引器日志"));
-    }
-    m_idleIndexCancelled = false;
-    if (!wasIdleFull && !wasOcrBackfill && m_reindexPending && m_indexMode != 0)
-        QTimer::singleShot(100, this, &SmartSpaceWidget::startIndexing);
+    if(!m_knowledgeProcess)return;
+    m_knowledgeProcess->setProperty("userPaused",true);terminateKnowledgeProcess(false);
 }
 
 SmartSpaceWidget::IndexSnapshot SmartSpaceWidget::readIndexSnapshot(
@@ -3399,21 +3357,22 @@ bool SmartSpaceWidget::applyIndexSnapshot(IndexSnapshot snapshot)
     QElapsedTimer elapsed; elapsed.start();
     setProperty("indexLoading", false);
     if (!snapshot.valid) {
-        if (!m_indexBusy) m_statusLabel->setText(snapshot.error);
+        if (!indexBusy()) m_statusLabel->setText(snapshot.error);
         return false;
     }
     // Exclusions may have changed while the initial snapshot was being read.
     auto &entries = snapshot.entries;
     entries.erase(std::remove_if(entries.begin(), entries.end(),
         [this](const SmartSpaceEntry &entry) { return pathExcluded(entry.path); }), entries.end());
-    m_entries = std::move(entries);
+    m_entries = std::move(entries);m_libraryOnlyEntryCount=0;
     updateResults(true);
     rebuildWatches();
-    if (!m_indexBusy)
+    if (!indexBusy())
         m_statusLabel->setText(snapshot.statusPrefix + QString::number(m_entries.size()) + snapshot.statusSuffix);
     if (qEnvironmentVariableIsSet("UKUI_FENCES_STARTUP_TRACE"))
         qInfo() << "[AiSpaceStartup] index-applied" << elapsed.elapsed() << "ms";
     setProperty("indexApplyMs",elapsed.elapsed());
+    if(!m_executedQuery.isEmpty() && !m_searchUsesRegex)startKnowledgeSearch(m_executedQuery);
     emit indexLoaded();
 #if defined(__GLIBC__)
     QTimer::singleShot(0, [] { malloc_trim(0); });
@@ -3501,7 +3460,7 @@ void SmartSpaceWidget::scheduleReindex()
 {
     if (m_indexMode != 1 || !m_automaticIndexingReady)
         return;
-    if (m_indexBusy) {
+    if (m_libraryJobBusy || property("knowledgeManagerVisible").toBool() || m_settingsViewVisible) {
         m_reindexPending = true;
         return;
     }
@@ -3602,7 +3561,13 @@ void SmartSpaceWidget::executeSearch()
 {
     if (!m_searchEdit || !commitSearchQuery(m_searchEdit->text(), true))
         return;
-    m_knowledgeScores.clear();
+    ++m_knowledgeSearchRevision;
+    if(m_knowledgeSearchProcess){m_knowledgeSearchProcess->disconnect(this);m_knowledgeSearchProcess->kill();m_knowledgeSearchProcess->deleteLater();m_knowledgeSearchProcess=nullptr;}
+    hidePreview();
+    m_entries.erase(std::remove_if(m_entries.begin(),m_entries.end(),[](const SmartSpaceEntry &entry){return entry.libraryOnly;}),m_entries.end());
+    m_libraryOnlyEntryCount=0;
+    for(auto &entry:m_entries){entry.libraryReference.clear();entry.libraryDb.clear();}
+    m_knowledgeScores.clear();m_knowledgeExtractionStates.clear();m_knowledgeAvailability.clear();
     m_knowledgeSnippets.clear();
     updateResults(true);
     if (!m_searchUsesRegex && !m_executedQuery.isEmpty())
@@ -3780,12 +3745,7 @@ void SmartSpaceWidget::excludeFolderFromIndex(const QString &path)
     }
     m_excludedFolders << clean;
     m_hiddenFolders.removeAll(clean);
-    if (m_indexer && m_indexer->state() != QProcess::NotRunning) {
-        if (m_idleFullIndex || m_ocrBackfill)
-            stopIdleFullIndex();
-        else
-            m_indexer->terminate();
-    }
+    if(m_libraryJobBusy)stopIdleFullIndex();
     m_entries.erase(std::remove_if(m_entries.begin(), m_entries.end(),
         [this](const SmartSpaceEntry &entry) { return pathExcluded(entry.path); }),
         m_entries.end());
@@ -3795,39 +3755,8 @@ void SmartSpaceWidget::excludeFolderFromIndex(const QString &path)
     rebuildWatches();
     updateResults(true);
     m_statusLabel->setText(QStringLiteral(
-        "已排除索引“%1” · 点击更新后写入正式快照 · 设置中可恢复")
+        "已排除索引“%1” · 点击底部“增量”后更新文件清单 · 设置中可恢复")
         .arg(QFileInfo(clean).fileName()));
-}
-
-void SmartSpaceWidget::showResultSortMenu()
-{
-    if (!m_sortButton)
-        return;
-    QMenu menu(this);
-    applyMenuTheme(&menu);
-    struct SortOption { int mode; const char *label; const char *tip; };
-    const SortOption options[] = {
-        {0, "相关度", "文件名命中优先，再按正文和路径的匹配度排序"},
-        {1, "修改时间", "最近修改的文件排在前面"},
-        {2, "文件大小", "较大的文件排在前面"}
-    };
-    for (const SortOption &option : options) {
-        QAction *action = menu.addAction(QStringLiteral("%1  %2")
-            .arg(option.mode == m_resultSortMode
-                    ? QStringLiteral("✔") : QStringLiteral("○"),
-                 QString::fromUtf8(option.label)));
-        action->setToolTip(QString::fromUtf8(option.tip));
-        connect(action, &QAction::triggered, this, [this, option] {
-            m_resultSortMode = option.mode;
-            static const char *labels[] = {
-                "排序：按相关度⌄", "排序：按修改时间⌄", "排序：按大小⌄"};
-            m_sortButton->setText(QString::fromUtf8(labels[m_resultSortMode]));
-            m_sortButton->setToolTip(QString::fromUtf8(option.tip));
-            saveSettings();
-            updateResults(false);
-        });
-    }
-    execMenuAt(menu, m_sortButton);
 }
 
 QVector<int> SmartSpaceWidget::matchingFileIndexes() const
@@ -3996,11 +3925,27 @@ QWidget *SmartSpaceWidget::createFileCard(const SmartSpaceEntry &entry,
         metadata << modified;
     if (entry.ocrStatus == QLatin1String("pending"))
         metadata << QStringLiteral("待检测/OCR");
+    if(m_knowledgeAvailability.value(entry.path)==QLatin1String("unseen"))metadata<<QStringLiteral("本轮未发现来源 · 保留库内正文");
+    const QString knowledgeState=m_knowledgeExtractionStates.value(entry.path);
+    if(knowledgeState==QLatin1String("partial"))metadata<<QStringLiteral("正文部分提取");
+    else if(knowledgeState==QLatin1String("failed") || knowledgeState==QLatin1String("missing"))metadata<<QStringLiteral("提取未完成 · 使用已存快照");
     auto *meta = new QLabel(metadata.join(QStringLiteral(" · ")), card);
     meta->setProperty("cardMeta", true);
     meta->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     meta->setVisible(m_resultDensity >= 0);
-    texts->addWidget(meta);
+    auto *metadataRow=new QHBoxLayout;metadataRow->setContentsMargins(0,0,0,0);metadataRow->setSpacing(6);
+    metadataRow->addWidget(meta);
+    const QString parentName=entry.libraryOnly?entry.libraryName:QFileInfo(entry.path).dir().dirName();
+    if (!parentName.isEmpty() && !ultraCompact) {
+        auto *folderBadge=new QLabel(card);folderBadge->setProperty("folderBadge",true);
+        QFont badgeFont=font();badgeFont.setPixelSize(10);folderBadge->setFont(badgeFont);
+        folderBadge->setText(QFontMetrics(badgeFont).elidedText(parentName,Qt::ElideRight,164));
+        folderBadge->setMaximumWidth(180);
+        folderBadge->setToolTip(entry.libraryOnly?QStringLiteral("知识库副本 · %1").arg(entry.originalPath):QFileInfo(entry.path).absolutePath());
+        metadataRow->insertWidget(0,folderBadge);
+    }
+
+    metadataRow->addStretch(1);texts->addLayout(metadataRow);
 
     auto *snippet = new QLabel(card);
     snippet->setProperty("cardSnippet", true);
@@ -4030,21 +3975,21 @@ QWidget *SmartSpaceWidget::createFileCard(const SmartSpaceEntry &entry,
     }
 
     auto *preview = new QToolButton(card);
-    preview->setText(compact
-        ? QStringLiteral("◉")
-        : QStringLiteral("◉ 预览"));
+    preview->setText(QStringLiteral("预览"));
+    preview->setAccessibleName(QStringLiteral("预览 %1").arg(entry.name));
     preview->setToolTip(QStringLiteral("预览相关内容"));
     preview->setProperty("previewAction", true);
     preview->setToolButtonStyle(Qt::ToolButtonTextOnly);
     preview->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     const int previewExtent = previewExtents[densityIndex];
-    if (compact)
-        preview->setFixedSize(previewExtent, previewExtent);
-    else
-        preview->setMinimumHeight(previewExtent);
+    preview->setFixedSize(52,qMax(22,previewExtent));
     connect(preview, &QToolButton::clicked, this,
             [this, path = entry.path] { showPreviewForPath(path); });
-    row->addWidget(preview, 0, Qt::AlignVCenter);
+    auto *actionSlot=new QWidget(card);
+    actionSlot->setFixedSize(preview->size());
+    auto *actionLayout=new QHBoxLayout(actionSlot);actionLayout->setContentsMargins(0,0,0,0);actionLayout->addWidget(preview);
+    row->addWidget(actionSlot,0,Qt::AlignVCenter);
+    card->setPreviewButton(preview);
 
     // Text metrics vary with the system font and DPI. Keep density as a lower
     // bound so the final snippet line is not clipped by a fixed row height.
@@ -4070,8 +4015,7 @@ void SmartSpaceWidget::showPreviewForPath(const QString &path)
         return;
     QToolTip::hideText();
     if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning) {
-        m_previewProcess->kill();
-        m_previewProcess->waitForFinished(120);
+        m_previewProcess->disconnect(this);m_previewProcess->kill();m_previewProcess->deleteLater();m_previewProcess=nullptr;
     }
     m_pendingPreviewImage.clear();
     m_previewPath = path;
@@ -4088,7 +4032,14 @@ void SmartSpaceWidget::showPreviewForPath(const QString &path)
     if (!modified.isEmpty())
         metadata << modified;
     m_previewMeta->setText(metadata.join(QStringLiteral(" · ")));
-    m_previewOpenButton->setEnabled(QFileInfo::exists(entry->path));
+    m_previewOpenButton->setEnabled(!entry->libraryOnly && QFileInfo::exists(entry->path));
+    if(!entry->libraryReference.isEmpty()) {
+        m_previewMeta->setText(entry->libraryOnly?QStringLiteral("知识库副本 · %1 · 不含原文件").arg(entry->libraryName):QStringLiteral("个人知识库正文 · 按命中位置读取"));
+        const QString state=m_knowledgeExtractionStates.value(entry->path);
+        if(state==QLatin1String("partial") || state==QLatin1String("failed") || state==QLatin1String("missing"))m_previewMeta->setText(m_previewMeta->text()+QStringLiteral(" · 提取未完整，请结合来源核对"));
+        if(m_knowledgeAvailability.value(entry->path)==QLatin1String("unseen"))m_previewMeta->setText(m_previewMeta->text()+QStringLiteral(" · 本轮未发现来源，内容为已存快照"));
+        readLibraryPreview(*entry);return;
+    }
     m_previewImage->clear();
 
     if (entry->category == QLatin1String("image") &&
@@ -4119,11 +4070,42 @@ void SmartSpaceWidget::showPreviewForPath(const QString &path)
     }
 }
 
+void SmartSpaceWidget::readLibraryPreview(const SmartSpaceEntry &entry,int offset)
+{
+    if(m_libraryPreviewProcess)m_libraryPreviewProcess->kill();
+    setProperty("libraryPreviewLoaded",false);
+    m_previewStack->setCurrentWidget(m_previewText);m_previewText->setHtml(QStringLiteral("正在读取库内正文…"));
+    auto *process=new QProcess(this);m_libraryPreviewProcess=process;
+    const QString expected=entry.path;
+    connect(process,&QProcess::errorOccurred,this,[this,process,expected](QProcess::ProcessError error){
+        if(error==QProcess::FailedToStart){if(m_libraryPreviewProcess==process && m_previewPath==expected)m_previewText->setPlainText(QStringLiteral("无法启动独立知识库检索工具，请检查 Python3 与安装文件。"));process->deleteLater();}
+    });
+    connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),this,[this,process,expected](int code,QProcess::ExitStatus){
+        const auto data=QJsonDocument::fromJson(process->readAllStandardOutput().trimmed()).object();process->deleteLater();
+        if(m_libraryPreviewProcess!=process || !m_previewVisible || m_previewPath!=expected)return;
+        if(code!=0 || !data.value(QStringLiteral("error")).toString().isEmpty()) {m_previewText->setPlainText(QStringLiteral("无法读取知识库正文：%1").arg(data.value(QStringLiteral("error")).toString()));return;}
+        QString html;
+        if(data.value(QStringLiteral("results")).toArray().isEmpty())html=QStringLiteral("<p>当前库只有该文档的元数据，没有可用正文。</p><p>需要在资料来源机器补充文本提取或 OCR，再导出新版本。此处不能恢复缺失的原件。</p>");
+        for(const auto &v:data.value(QStringLiteral("results")).toArray()) {
+            const auto row=v.toObject();QString text=row.value(QStringLiteral("content")).toString().toHtmlEscaped();text.replace(QLatin1Char('\n'),QStringLiteral("<br>"));
+            html+=QStringLiteral("<h4>%1</h4><p>%2</p>").arg(row.value(QStringLiteral("locator")).toString().toHtmlEscaped(),text);
+        }
+        if(data.value(QStringLiteral("hasMore")).toBool())html+=QStringLiteral("<p><a href=\"aispace-next:%1\">继续读取后续片段 →</a></p>").arg(data.value(QStringLiteral("nextOffset")).toInt());
+        m_previewText->setHtml(html);setProperty("libraryPreviewLoaded",true);
+    });
+    QStringList args{QFileInfo(knowledgeWorkerPath()).dir().filePath(QStringLiteral("knowledge_library.py")),QStringLiteral("--db"),entry.libraryDb,QStringLiteral("fetch"),QStringLiteral("--reference"),entry.libraryReference,QStringLiteral("--limit"),QStringLiteral("8")};
+    if(offset>=0)args<<QStringLiteral("--offset")<<QString::number(offset);
+    process->start(QStandardPaths::findExecutable(QStringLiteral("python3")),args);
+    QTimer::singleShot(5000,process,[process]{if(process->state()!=QProcess::NotRunning)process->kill();});
+}
+
 void SmartSpaceWidget::hidePreview()
 {
     // Invalidate the result before stopping the process. finished() is handled
     // asynchronously and must not revive the preview during retraction.
     m_previewVisible = false;
+    setProperty("libraryPreviewLoaded",false);
+    if(m_libraryPreviewProcess)m_libraryPreviewProcess->kill();
     m_previewPath.clear();
     m_pendingPreviewImage.clear();
     if (m_previewProcess && m_previewProcess->state() != QProcess::NotRunning)
@@ -4168,7 +4150,7 @@ void SmartSpaceWidget::startPdfPreview(const SmartSpaceEntry &entry)
 {
     const QString pdftoppm = QStandardPaths::findExecutable(
         QStringLiteral("pdftoppm"));
-    if (pdftoppm.isEmpty() || !m_previewProcess) {
+    if (pdftoppm.isEmpty()) {
         m_previewStack->setCurrentWidget(m_previewText);
         m_previewText->setHtml(relevantSnippetHtml(entry, 3, 56, 120));
         return;
@@ -4201,6 +4183,19 @@ void SmartSpaceWidget::startPdfPreview(const SmartSpaceEntry &entry)
         QStringLiteral("120"), QStringLiteral("-png"),
         entry.path, prefix
     };
+    auto *process=new QProcess(this);m_previewProcess=process;process->setProcessChannelMode(QProcess::MergedChannels);
+    const QString requestPath=m_previewPath,image=m_pendingPreviewImage;
+    auto finish=[this,process,requestPath,image](bool success){
+        if(m_previewProcess==process){m_previewProcess=nullptr;
+            if(m_previewVisible && m_previewPath==requestPath){
+                if(success && QFileInfo::exists(image)){showPreviewImage(image);prunePreviewCache();}
+                else{const auto *entry=entryForPath(requestPath);m_previewStack->setCurrentWidget(m_previewText);m_previewText->setHtml(entry?relevantSnippetHtml(*entry,3,56,120):QStringLiteral("预览未完成，可重试。"));}
+            }
+        }process->deleteLater();
+    };
+    connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),this,[finish](int code,QProcess::ExitStatus status){finish(code==0 && status==QProcess::NormalExit);});
+    connect(process,&QProcess::errorOccurred,this,[finish](QProcess::ProcessError error){if(error==QProcess::FailedToStart)finish(false);});
+    QTimer::singleShot(15000,process,[process]{if(process->state()!=QProcess::NotRunning)process->kill();});
     const QString nice = QStandardPaths::findExecutable(QStringLiteral("nice"));
     const QString ionice = QStandardPaths::findExecutable(QStringLiteral("ionice"));
     if (!ionice.isEmpty()) {
@@ -4300,8 +4295,8 @@ void SmartSpaceWidget::updateResults(bool resetFolders)
     if (visible == 0) {
         auto *empty = new QListWidgetItem(
             QIcon::fromTheme(QStringLiteral("edit-find")),
-            m_entries.isEmpty() ? QStringLiteral("尚未建立索引")
-                                : QStringLiteral("没有匹配文件"),
+            m_executedQuery.isEmpty()?QStringLiteral("输入关键词检索知识库，或从向导建立个人库")
+                                      :QStringLiteral("没有匹配的文件或知识 · 请查看检索状态"),
             m_fileList);
         empty->setFlags(Qt::NoItemFlags);
     }
@@ -4402,6 +4397,7 @@ void SmartSpaceWidget::appendRootLevel()
     layout->setSpacing(4);
     QListWidget *list = createEntryList();
     list->setObjectName(QStringLiteral("smartRootFolderList"));
+    list->setItemDelegate(new FolderBadgeDelegate(list));
     static_cast<SmartEntryList *>(list)->setBlankClickAction(
         [this] { resetFolderScopeFromBlankClick(); });
     list->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -4455,14 +4451,15 @@ void SmartSpaceWidget::appendRootLevel()
     for (const FolderResult &folder : folders) {
         auto *item = new QListWidgetItem(
             QIcon::fromTheme(QStringLiteral("folder")),
-            QStringLiteral("%1  (%2)").arg(folder.name).arg(folder.count), list);
+            folder.name, list);
+        item->setData(kFolderCountRole,folder.count);
         item->setData(PathRole, normalizedPath(folder.path));
         item->setToolTip(folder.path);
     }
     if (folders.isEmpty()) {
         auto *empty = new QListWidgetItem(
             QIcon::fromTheme(QStringLiteral("folder")),
-            m_entries.isEmpty() ? QStringLiteral("请先点击“更新”建立索引")
+            m_entries.isEmpty() ? QStringLiteral("本地目录为空 · 已导入的知识库可直接搜索")
                                 : QStringLiteral("当前条件下没有子文件夹"), list);
         empty->setFlags(Qt::NoItemFlags);
     }
@@ -4530,6 +4527,7 @@ void SmartSpaceWidget::appendFolderLevel(const QString &parentPath, int level)
     layout->addWidget(label);
     QListWidget *list = createEntryList();
     list->setObjectName(QStringLiteral("smartChildFolderList"));
+    list->setItemDelegate(new FolderBadgeDelegate(list));
     static_cast<SmartEntryList *>(list)->setBlankClickAction(
         [this] { resetFolderScopeFromBlankClick(); });
     list->setMaximumHeight(190);
@@ -4537,7 +4535,8 @@ void SmartSpaceWidget::appendFolderLevel(const QString &parentPath, int level)
     for (const FolderResult &folder : folders) {
         auto *item = new QListWidgetItem(
             QIcon::fromTheme(QStringLiteral("folder")),
-            QStringLiteral("%1  (%2)").arg(folder.name).arg(folder.count), list);
+            folder.name, list);
+        item->setData(kFolderCountRole,folder.count);
         item->setData(PathRole, folder.path);
         item->setToolTip(folder.path);
     }
@@ -4566,7 +4565,8 @@ void SmartSpaceWidget::folderActivated(QListWidgetItem *item, int level)
     m_folderScroll->ensureVisible(0, m_folderLevelsContainer->height(), 0, 20);
 }
 
-int SmartSpaceWidget::resultCount() const { return m_fileList ? m_fileList->count() : 0; }
+int SmartSpaceWidget::indexedEntryCount() const {return m_entries.size()-m_libraryOnlyEntryCount;}
+int SmartSpaceWidget::resultCount() const {int count=0;if(m_fileList)for(int row=0;row<m_fileList->count();++row)if(!m_fileList->item(row)->data(PathRole).toString().isEmpty())++count;return count;}
 void SmartSpaceWidget::searchFor(const QString &query) { m_searchEdit->setText(query);executeSearch(); }
 
 void SmartSpaceWidget::openFileItem(QListWidgetItem *item)
@@ -4577,6 +4577,7 @@ void SmartSpaceWidget::openFileItem(QListWidgetItem *item)
 
 void SmartSpaceWidget::openPath(const QString &path)
 {
+    if(path.startsWith(QLatin1String("aispace://"))){showPreviewForPath(path);return;}
     const DesktopItem entry = DesktopItem::fromPath(path);
     if (!entry.isValid())
         return;
@@ -4598,6 +4599,12 @@ void SmartSpaceWidget::showEntryMenu(QListWidget *list, const QPoint &position)
 
     QMenu menu(this);
     applyMenuTheme(&menu);
+    if(path.startsWith(QLatin1String("aispace://"))) {
+        auto *read=menu.addAction(QStringLiteral("阅读库内正文"));auto *copy=menu.addAction(QStringLiteral("复制知识引用"));
+        connect(read,&QAction::triggered,this,[this,path]{showPreviewForPath(path);});
+        connect(copy,&QAction::triggered,this,[path]{QApplication::clipboard()->setText(path);});
+        menu.exec(list->viewport()->mapToGlobal(position));return;
+    }
     QAction *open = menu.addAction(QIcon::fromTheme(QStringLiteral("document-open")),
                                    QFileInfo(path).isDir()
                                        ? QStringLiteral("用文件管理器打开")
@@ -4674,11 +4681,11 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
         QPushButton[settingsGroupAction="true"] {
             padding: 4px 12px; min-height: 22px;
         }
-        QPushButton:hover { background: %4; border-color: %6; }
-        QPushButton#primarySettingsButton { color: white; background: %6;
-                                            border-color: %6; font-weight: 600;
+        QPushButton:hover { background: %4; border-color: %9; }
+        QPushButton#primarySettingsButton { color: white; background: #4f46e5;
+                                            border-color: #4f46e5; font-weight: 600;
                                             padding: 8px 20px; }
-        QPushButton#primarySettingsButton:hover { background: %9; border-color: %9; }
+        QPushButton#primarySettingsButton:hover { background: #4338ca; border-color: #4338ca; }
         QPushButton#settingsBackButton { padding: 8px 16px; }
         QCheckBox, QLabel { color: %1; }
         QCheckBox { spacing: 8px; }
@@ -4797,24 +4804,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     hiddenList->addItems(m_hiddenFolders);
     hiddenList->setFixedHeight(54);
     indexLayout->addWidget(hiddenList);
-    auto *ocr = new QCheckBox(
-        QStringLiteral("启用独立 OCR 补全（Tesseract）"), indexPage);
-    ocr->setChecked(m_ocrImages);
-    indexLayout->addWidget(ocr);
-    auto *resourceRow = new QHBoxLayout;
-    auto *contentBudget = new QSpinBox(indexPage);
-    contentBudget->setRange(32, 64);
-    contentBudget->setValue(qBound(32, m_maxTotalContentMb, 64));
-    contentBudget->setSuffix(QStringLiteral(" MB"));
-    resourceRow->addWidget(new QLabel(
-        QStringLiteral("快全量正文预算："), indexPage));
-    resourceRow->addWidget(contentBudget);
-    resourceRow->addStretch(1);
-    indexLayout->addLayout(resourceRow);
-    auto *resourceHint = new QLabel(QStringLiteral(
-        "增量与快全量均保留完整快照，不再设置文件数上限。"
-        "增量固定使用 64 MB 新正文保护预算；上方预算仅用于快全量。"
-        "扫描 PDF 和图片会先标记，再交给独立 OCR 按钮。"), indexPage);
+    auto *resourceHint=new QLabel(QStringLiteral("文本与OCR资源设置请使用分阶段建库向导。①扫描不提取正文；②提取文本；③按CPU和内存限额补OCR。"),indexPage);
     resourceHint->setWordWrap(true);
     resourceHint->setProperty("settingsHint", true);
     indexLayout->addWidget(resourceHint);
@@ -5077,6 +5067,8 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     auto *knowledgeLayout = new QVBoxLayout(knowledgeTab);
     knowledgeLayout->setContentsMargins(14, 14, 14, 14);
     knowledgeLayout->setSpacing(10);
+    auto *managerButton=new QPushButton(QStringLiteral("存储设置 / 导入导出 / 分阶段建库…"),knowledgeTab);
+    knowledgeLayout->addWidget(managerButton);connect(managerButton,&QPushButton::clicked,this,&SmartSpaceWidget::showKnowledgeManager);
     auto *knowledgePathRow = new QHBoxLayout;
     auto *knowledgePathEdit = new QLineEdit(
         m_knowledgeDirectory, knowledgeTab);
@@ -5087,14 +5079,9 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     knowledgePathRow->addWidget(knowledgePathEdit, 1);
     knowledgePathRow->addWidget(browseKnowledge);
     knowledgeLayout->addLayout(knowledgePathRow);
-    connect(browseKnowledge, &QPushButton::clicked, &dialog,
-            [&dialog, knowledgePathEdit] {
-        const QString path = QFileDialog::getExistingDirectory(
-            dialog.window(), QStringLiteral("选择知识库保存位置"),
-            knowledgePathEdit->text());
-        if (!path.isEmpty())
-            knowledgePathEdit->setText(path);
-    });
+    knowledgePathEdit->setReadOnly(true);
+    browseKnowledge->setText(QStringLiteral("存储向导…"));
+    connect(browseKnowledge,&QPushButton::clicked,&dialog,[this,knowledgePathEdit]{showKnowledgeManager();knowledgePathEdit->setText(m_knowledgeDirectory);});
     auto *chunkRow = new QHBoxLayout;
     auto *knowledgeChunkSize = new QSpinBox(knowledgeTab);
     knowledgeChunkSize->setRange(600, 3000);
@@ -5209,6 +5196,11 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
         if (!copyDirectoryTree(source, target, &error)) {
             skillStatus->setText(QStringLiteral("Skill 导出失败：%1").arg(error));
             return;
+        }
+        const QString runtime=QDir(target).filePath(QStringLiteral("scripts/knowledge_library.py"));
+        if(QFileInfo::exists(runtime))QFile::remove(runtime);
+        if(!QFile::copy(QFileInfo(knowledgeWorkerPath()).dir().filePath(QStringLiteral("knowledge_library.py")),runtime)) {
+            skillStatus->setText(QStringLiteral("无法导出独立检索运行时，请检查目标目录权限"));return;
         }
         skillStatus->setText(QStringLiteral("Skill 已导出到：%1").arg(target));
     });
@@ -5400,6 +5392,7 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     });
 
     connect(saveButton, &QPushButton::clicked, &dialog, [=, &dialog] {
+    if(m_libraryJobBusy){smartInformation(this,QStringLiteral("任务正在运行"),QStringLiteral("请先暂停建库，再保存资料和索引设置。"));return;}
     QStringList roots;
     for (int i = 0; i < rootList->count(); ++i) {
         const QString path = rootList->item(i)->text();
@@ -5473,16 +5466,12 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     const bool visibleFormatsChanged = visibleExtensions != m_visibleExtensions;
     const bool indexInputsChanged = roots != m_roots ||
         excludeChanged || indexedExtensions != m_indexedExtensions ||
-        ocr->isChecked() != m_ocrImages ||
-        contentBudget->value() != m_maxTotalContentMb ||
         providerEdit->text().trimmed() != m_providerConfig;
     m_roots = roots;
     m_excludedFolders = excludedFolders;
     m_hiddenFolders = hiddenFolders;
     m_indexedExtensions = indexedExtensions;
     m_visibleExtensions = visibleExtensions;
-    m_ocrImages = ocr->isChecked();
-    m_maxTotalContentMb = contentBudget->value();
     m_indexMode = indexMode->currentData().toInt();
     m_indexIntervalMinutes = interval->value();
     m_themeMode = themeMode->currentData().toInt();
@@ -5490,24 +5479,12 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     m_customOpacity = 100;
     m_customColorsEnabled = false;
     setAutoStart(autoStart->isChecked());
-    m_knowledgeDirectory = QDir::cleanPath(
-        knowledgePathEdit->text().trimmed());
-    if (m_knowledgeDirectory.isEmpty()) {
-        m_knowledgeDirectory = QStandardPaths::writableLocation(
-            QStandardPaths::GenericDataLocation)
-            + QStringLiteral("/ai-space/knowledge");
-    }
     m_knowledgeChunkSize = knowledgeChunkSize->value();
     m_knowledgeOverlap = qMin(
         knowledgeOverlap->value(), m_knowledgeChunkSize / 3);
+    if(m_providerConfig!=providerEdit->text().trimmed())m_providerApprovedDigest.clear();
     m_providerConfig = providerEdit->text().trimmed();
-    if (indexInputsChanged && m_indexer &&
-        m_indexer->state() != QProcess::NotRunning) {
-        if (m_idleFullIndex || m_ocrBackfill)
-            stopIdleFullIndex();
-        else
-            m_indexer->terminate();
-    }
+    if(m_libraryJobBusy)stopIdleFullIndex();
     m_entries.erase(std::remove_if(m_entries.begin(), m_entries.end(),
         [this](const SmartSpaceEntry &entry) { return pathExcluded(entry.path); }),
         m_entries.end());
@@ -5529,13 +5506,13 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     if (excludeChanged || visibleFormatsChanged || hiddenChanged)
         updateResults(true);
     if (indexNow->isChecked()) {
-        startIndexing();
+        QTimer::singleShot(0,this,[this]{setSettingsViewVisible(false);startIndexing();});
     } else if (indexInputsChanged) {
         m_statusLabel->setText(QStringLiteral(
-            "索引设置已保存 · 未自动扫描，点击更新按钮后生效"));
+            "索引设置已保存 · 未自动扫描，点击底部“增量”后生效"));
     }
     if (buildKnowledgeNow->isChecked())
-        QTimer::singleShot(0, this, &SmartSpaceWidget::startKnowledgeBuild);
+        QTimer::singleShot(0,this,[this]{setSettingsViewVisible(false);startKnowledgeBuild();});
     indexNow->setChecked(false);
     buildKnowledgeNow->setChecked(false);
     dialog.setProperty("settingsDirty", false);
@@ -5549,7 +5526,7 @@ void SmartSpaceWidget::setEditMode(bool edit)
 {
     m_editMode = edit;
     if (m_sizeGrip)
-        m_sizeGrip->setVisible(!m_fenceEmbedded);
+        m_sizeGrip->setVisible(true);
     update();
 }
 
@@ -5558,10 +5535,6 @@ void SmartSpaceWidget::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     painter.setClipRegion(event->region());
     painter.setRenderHint(QPainter::Antialiasing);
-    if (m_fenceEmbedded) {
-        painter.fillRect(rect(), m_surfaceColor);
-        return;
-    }
     if (isWindow()) {
         painter.setCompositionMode(QPainter::CompositionMode_Source);
         painter.fillRect(rect(), Qt::transparent);
@@ -5570,7 +5543,8 @@ void SmartSpaceWidget::paintEvent(QPaintEvent *event)
     const bool maxed = isWindowMaximized();
     const qreal radius = maxed ? 0.0 : AiSpace::WindowMetrics::CornerRadius;
     QPainterPath path;path.addRoundedRect(QRectF(rect()).adjusted(.5,.5,-.5,-.5),radius,radius);
-    painter.fillPath(path,m_surfaceColor);
+    const QColor shell=isActiveWindow()?m_surfaceColor:QColor(m_themeMode==2?"#f8fafc":"#0f172a");
+    painter.fillPath(path,shell);
     if (!maxed) {
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(m_borderColor,1));
@@ -5604,18 +5578,16 @@ void SmartSpaceWidget::contextMenuEvent(QContextMenuEvent *event)
     QAction *pin = menu.addAction(
         m_alwaysOnTop ? QStringLiteral("取消置顶") : QStringLiteral("置顶"));
     menu.addSeparator();
-    QAction *refresh = menu.addAction(smartMenuIcon(QStringLiteral("refresh")),
-                                      QStringLiteral("更新索引（增量复用）"));
+    QAction *refresh = menu.addAction(smartMenuIcon(QStringLiteral("refresh")),QStringLiteral("增量更新 · 扫描并复用正文"));
     QAction *settings = menu.addAction(smartMenuIcon(QStringLiteral("settings")),
                                        QStringLiteral("AI空间设置"));
     QAction *idleIndex = menu.addAction(smartMenuIcon(QStringLiteral("fast-full")),
-        m_idleFullIndex ? QStringLiteral("快速全量正在运行")
-                        : QStringLiteral("快速全量…"));
+        QStringLiteral("① 全量扫描"));
+    QAction *textIndex=menu.addAction(smartMenuIcon(QStringLiteral("refresh")),QStringLiteral("② 文本建库"));textIndex->setEnabled(!m_libraryJobBusy);
     QAction *ocrIndex = menu.addAction(smartMenuIcon(QStringLiteral("ocr")),
-        m_ocrBackfill ? QStringLiteral("OCR 检测/补全正在运行")
-                      : QStringLiteral("OCR 检测与补全…"));
-    idleIndex->setEnabled(!m_indexBusy);
-    ocrIndex->setEnabled(!m_indexBusy);
+        QStringLiteral("③ OCR补全"));
+    idleIndex->setEnabled(!m_libraryJobBusy);
+    ocrIndex->setEnabled(!m_libraryJobBusy);
 
     QAction *selected = menu.exec(event->globalPos());
     if (selected == pin)
@@ -5625,13 +5597,17 @@ void SmartSpaceWidget::contextMenuEvent(QContextMenuEvent *event)
     else if (selected == settings)
         showSettingsDialog();
     else if (selected == idleIndex)
-        startIdleFullIndex();
+        startGuidedBuild(false,false,QStringLiteral("manifest"));
+    else if (selected == textIndex)
+        startGuidedBuild(false,false,QStringLiteral("text"));
     else if (selected == ocrIndex)
         startOcrIndex();
 }
 
 bool SmartSpaceWidget::eventFilter(QObject *watched, QEvent *event)
 {
+    if(watched==m_statusLabel && event->type()==QEvent::MouseButtonRelease && static_cast<QMouseEvent *>(event)->button()==Qt::LeftButton){showKnowledgeStatus();return true;}
+    if(watched==m_statusLabel && event->type()==QEvent::KeyPress){auto *key=static_cast<QKeyEvent *>(event);if(key->key()==Qt::Key_Return || key->key()==Qt::Key_Space){showKnowledgeStatus();return true;}}
     auto *title = qobject_cast<QLabel *>(watched);
     if (title && title->property("cardName").toBool()) {
         if (event->type() == QEvent::Leave) {
@@ -5685,7 +5661,7 @@ constexpr int kResizeBand = 6;
 
 int SmartSpaceWidget::hitResizeEdges(const QPoint &pos) const
 {
-    if (m_fenceEmbedded || isWindowMaximized())
+    if (isWindowMaximized() || !rect().contains(pos))
         return 0;
     int edges = 0;
     if (pos.x() <= kResizeBand) edges |= kResizeLeft;
@@ -5698,18 +5674,23 @@ int SmartSpaceWidget::hitResizeEdges(const QPoint &pos) const
 void SmartSpaceWidget::updateResizeCursor(const QPoint &pos)
 {
     const int edges = hitResizeEdges(pos);
+    Qt::CursorShape shape = Qt::ArrowCursor;
     if ((edges & kResizeLeft && edges & kResizeTop) ||
         (edges & kResizeRight && edges & kResizeBottom))
-        setCursor(Qt::SizeFDiagCursor);
+        shape = Qt::SizeFDiagCursor;
     else if ((edges & kResizeRight && edges & kResizeTop) ||
              (edges & kResizeLeft && edges & kResizeBottom))
-        setCursor(Qt::SizeBDiagCursor);
+        shape = Qt::SizeBDiagCursor;
     else if (edges & (kResizeLeft | kResizeRight))
-        setCursor(Qt::SizeHorCursor);
+        shape = Qt::SizeHorCursor;
     else if (edges & (kResizeTop | kResizeBottom))
-        setCursor(Qt::SizeVerCursor);
-    else
-        unsetCursor();
+        shape = Qt::SizeVerCursor;
+    if (!edges) {
+        if (testAttribute(Qt::WA_SetCursor))
+            unsetCursor();
+    } else if (!testAttribute(Qt::WA_SetCursor) || cursor().shape() != shape) {
+        setCursor(shape);
+    }
 }
 
 static bool insideTitleBar(QWidget *self, QWidget *bar, const QPoint &pos)
@@ -5722,7 +5703,7 @@ static bool insideTitleBar(QWidget *self, QWidget *bar, const QPoint &pos)
 
 void SmartSpaceWidget::mousePressEvent(QMouseEvent *event)
 {
-    if (m_fenceEmbedded || event->button() != Qt::LeftButton) {
+    if (event->button() != Qt::LeftButton) {
         QWidget::mousePressEvent(event);
         return;
     }
@@ -5788,6 +5769,7 @@ void SmartSpaceWidget::mouseReleaseEvent(QMouseEvent *event)
         m_resizing = false;
         m_dragging = false;
         m_resizeEdges = 0;
+        updateResizeCursor(event->pos());
         if (dragged && !isWindowMaximized())
             move(boundedPosition(pos()));
         saveSettings();
@@ -5799,7 +5781,7 @@ void SmartSpaceWidget::mouseReleaseEvent(QMouseEvent *event)
 
 void SmartSpaceWidget::mouseDoubleClickEvent(QMouseEvent *event)
 {
-    if (!m_fenceEmbedded && event->button() == Qt::LeftButton &&
+    if (event->button() == Qt::LeftButton &&
         insideTitleBar(this, m_actionRail, event->pos()) &&
         !hitResizeEdges(event->pos())) {
         m_dragging = false;
@@ -5812,8 +5794,6 @@ void SmartSpaceWidget::mouseDoubleClickEvent(QMouseEvent *event)
 
 void SmartSpaceWidget::setWindowMaximized(bool maximized)
 {
-    if (m_fenceEmbedded)
-        return;
     if (maximized == m_isMaximized) {
         updateWindowStateButtons();
         return;
@@ -5853,8 +5833,6 @@ void SmartSpaceWidget::toggleMaximized()
 
 void SmartSpaceWidget::minimizeWindow()
 {
-    if (m_fenceEmbedded)
-        return;
     showMinimized();
 }
 
@@ -5863,7 +5841,7 @@ void SmartSpaceWidget::updateWindowStateButtons()
     if (auto *bar=qobject_cast<AiSpace::WindowTitleBarWidget *>(m_actionRail))
         bar->setAppearance(m_themeMode==2,isActiveWindow(),isWindowMaximized());
     if (m_sizeGrip)
-        m_sizeGrip->setVisible(!m_fenceEmbedded && !isWindowMaximized());
+        m_sizeGrip->setVisible(!isWindowMaximized());
 }
 
 void SmartSpaceWidget::setSettingsViewVisible(bool visible)

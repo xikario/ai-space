@@ -5,3 +5,9 @@ __pycache__/
 *.user
 releases/
 .env
+
+# User knowledge is data, never source code.
+*.aikb
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

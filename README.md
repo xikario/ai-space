@@ -27,12 +27,20 @@ cmake --install build --prefix "$HOME/.local"
 
 PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中文语言包；缺失时会报告部分提取或失败，不冒充完整正文。旧 XLS/OLE 的 Python 依赖及许可证随源码提供。
 
+旧版 PowerPoint 97–2003（`.ppt`）及采用相同结构的 WPS 演示（`.dps`）可直接提取页面文字并保留页码，无需启动办公软件或先转为 PPTX。已有失败项可用「重新处理选中」补入；图片文字、备注及嵌入对象不在本次提取范围，会明确标为部分提取，详见[旧版演示兼容与验证](docs/LEGACY_PPT_20261022.md)。
+
 ## 使用
 
-打开设置，选择索引范围，先做快全量，再按需执行 OCR 或知识库建库。普通打开只读取已有快照，不自动全盘扫描。保持原有文件夹浏览、格式过滤、正文预览、暂停/续扫以及内嵌偏好设置页。
+从底部「知识库」打开管理与建库向导，先选择有足够空间的专用存储目录，设置单库上限和磁盘保留空间；按「全量文件清单 → 文本正文 → 可选 OCR」分阶段建库。普通打开不自动全盘扫描。支持 .aikb 单文件知识库导入/导出、只读挂载、版本切换及无原文件正文检索；查询与后台建库分开执行。
+
+当前分词索引面向中文、拉丁字母与数字。俄文、日文假名、韩文等尚未建立可靠的词项索引；此类查询会明确标为语言覆盖不足，不应把零结果当作库内不存在。
 
 命令行：`--show`、`--hide`、`--toggle`、`--settings`、`--status`、`--quit`、`--autostart`。旧 `--hide` 参数兼容为最小化到任务栏。同一会话只运行一个实例。窗口有自己的图标和任务栏身份；支持最小化、最大化/还原及标题栏拖动。Ctrl+K 随时返回搜索；宽窗口预览与结果并排，窄窗口以预览页显示。
 
+- [知识库 v1：存储、AIKB、SKILL 与建库向导](docs/KNOWLEDGE_LIBRARIES_V1_20261021.md)
+- [最终代码评审与验证记录](docs/FINAL_REVIEW_20261021.md)
+- [失败项重试、忽略与恢复](docs/FAILURE_ACTIONS_20261022.md)
+- [V2 界面精修](docs/UI_V2_POLISH_20261020.md)
 - [索引、检索与界面](docs/SMART_SPACE.md)
 - [知识库与命令行](docs/SMART_SPACE_KNOWLEDGE.md)
 - [结构化正文提取](docs/SMART_SPACE_STRUCTURED_KNOWLEDGE.md)
@@ -42,13 +50,15 @@ PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中�
 
 ## 数据与旧版迁移
 
-首次启动会复制旧 Fences 的智能空间偏好、索引快照、Provider 配置及知识库。源文件保留；新程序使用独立副本，后续改动不互相同步。界面和文件快照先就绪，多 GB 知识库在后台复制，不阻塞启动；完成前可检索文件快照，知识库写入暂不可用。知识库通过 SQLite 只读连接和 backup API 一致性迁移，包含已提交的 WAL 内容。
+首次启动可导入旧 Fences 的界面偏好和文件快照，但不再自动复制多 GB 知识库。已有独立库继续使用；未迁移时可只读查询旧库。需要搬运或共享时，显式选择目标盘并导出/导入 .aikb，避免登录时无提示地占用大量磁盘。新位置建库成功后切换，原库保留为只读来源。
 
 | 数据 | 默认位置 |
 | --- | --- |
 | 配置 | `~/.config/xikario/ai-space.ini` |
 | 文件快照 | `~/.cache/xikario/ai-space/smart-space/index.json` |
 | 知识库 | `~/.local/share/ai-space/knowledge/smart-space-knowledge.sqlite` |
+| 挂载库注册表 | `~/.config/ai-space/libraries.json` |
+| 新建清单 / OCR 缓存 | 所选知识库目录下 `catalog/` / `ocr-cache/` |
 | Provider | `~/.config/ai-space/providers.json` |
 
 遵循 XDG 环境变量；自定义知识库目录以设置为准。迁移不会覆盖已有 AI空间文件，也不继承 Fences 的自动启动。旧版与独立版同时运行时会各自维护副本，建议完成迁移后只使用独立版索引。
@@ -57,7 +67,7 @@ PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中�
 
 采用不透明的纯色明暗主题，不读取桌面壁纸，不生成玻璃材质，不执行模糊或折射 shader。保留普通窗口圆角和矢量按钮；贴边隐藏、星标入口和收缩动画已移除。标题栏月亮/太阳按钮切换主题。
 
-扫描、OCR、建库会消耗 CPU / 磁盘；后台低优先级不代表零开销。实际性能取决于文档数量、格式与 OCR 依赖。
+扫描、OCR、建库会消耗 CPU / 磁盘。默认保留至少 2 GiB、单库上限 32 GiB，可自行调整；OCR 默认单任务单线程、约 25% 单核时间片和 1 GiB 进程地址空间上限，内存紧张时暂停。逐页断点缓存最多 512 MiB，存于所选盘。实际性能仍取决于文档数量、格式与 OCR 依赖。
 
 ## 测试
 

@@ -52,6 +52,9 @@ class SmartSpaceIndexerTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def run_indexer(self, *extra, env=None, timeout=120):
+        if "--provider-config" in extra:
+            sys.path.insert(0,str(INDEXER.parent));from provider_policy import load_policy
+            extra=(*extra,"--provider-approval",load_policy(extra[extra.index("--provider-config")+1])[1])
         completed = subprocess.run(
             [sys.executable, str(INDEXER), "--roots-json",
              json.dumps([str(self.root)], ensure_ascii=False),
@@ -569,7 +572,7 @@ class SmartSpaceIndexerTests(unittest.TestCase):
         try:
             config = Path(self.temporary.name) / "http.json"
             config.write_text(json.dumps({"providers": [{
-                "name": "http-test", "type": "http",
+                "name": "http-test", "type": "http", "includeRoots": True,
                 "url": "http://127.0.0.1:%d/search" % server.server_port,
                 "limit": 12
             }]}), encoding="utf-8")

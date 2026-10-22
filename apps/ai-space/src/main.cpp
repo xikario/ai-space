@@ -21,6 +21,8 @@ int main(int argc,char **argv)
     const QString method=parser.isSet("quit")?"quit":parser.isSet("status")?"status":parser.isSet("settings")?"showSettings":parser.isSet("hide")?"hideWindow":parser.isSet("toggle")?"toggleWindow":"showWindow";
     auto bus=QDBusConnection::sessionBus();
     if(!bus.registerService("org.ukui.AiSpace")) {
+        // A duplicate session-autostart must never surface an existing window.
+        if(parser.isSet("autostart"))return 0;
         QDBusInterface existing("org.ukui.AiSpace","/aiSpace","org.ukui.AiSpace",bus);existing.setTimeout(3000);
         const auto reply=existing.call(method);
         if(reply.type()==QDBusMessage::ErrorMessage){std::fprintf(stderr,"%s\n",qPrintable(reply.errorMessage()));return 1;}
@@ -31,6 +33,6 @@ int main(int argc,char **argv)
     if(!parser.isSet("autostart"))qputenv("AI_SPACE_EXPLICIT_SHOW","1");
     AiSpaceController controller;
     if(!bus.registerObject("/aiSpace",&controller,QDBusConnection::ExportScriptableSlots|QDBusConnection::ExportAllSignals))return 1;
-    controller.initialize(!parser.isSet("hide"),parser.isSet("settings"));
+    controller.initialize(!parser.isSet("hide") && !parser.isSet("autostart"),parser.isSet("settings"));
     return app.exec();
 }

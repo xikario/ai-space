@@ -131,6 +131,9 @@ class KnowledgeWorkerTest(unittest.TestCase):
                 "build", "--index-json", legacy, "--db", db, check=False)
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("too large", lines[-1]["error"])
+            self.assertFalse(os.path.exists(db), 'invalid inventory must not create or change the database')
+            with KNOWLEDGE.open_db(db) as handle:
+                handle.commit()
             with sqlite3.connect(db) as handle:
                 handle.execute(
                     "UPDATE meta SET value='999' WHERE key='schema_version'")
