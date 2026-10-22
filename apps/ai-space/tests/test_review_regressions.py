@@ -312,6 +312,21 @@ class ReviewRegressions(unittest.TestCase):
         self.assertEqual(db.execute("SELECT count(*) FROM ignored_documents").fetchone()[0], 0)
         db.close()
 
+    def test_long_diagnostic_keeps_persisted_failure_category(self):
+        path = self.root / "long-failure.sqlite"
+        db = worker.open_db(str(path))
+        db.execute("INSERT INTO documents(id,path,name) VALUES(1,'/example','example')")
+        db.execute(
+            "INSERT INTO extraction_state(document_id,status,issues_json) VALUES(1,'failed',?)",
+            (json.dumps(["Workbook is encrypted", "x" * 20000]),),
+        )
+        failure_store.prepare(db)
+        db.commit()
+        db.close()
+        result = lib.failure_list(path, category="encrypted")
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["results"][0]["failure_category"], "encrypted")
+
     def test_sqlite_failure_still_emits_final_json(self):
         folder = self.root / "managed"
         folder.mkdir()

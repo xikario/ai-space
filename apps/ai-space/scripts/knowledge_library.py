@@ -75,7 +75,7 @@ def configured_db():
     if override:
         return str(Path(override).expanduser().absolute())
     cfg = configparser.ConfigParser(interpolation=None)
-    cfg.read(str(config_home() / "xikario/ai-space.ini"))
+    cfg.read(str(config_home() / "xikario/ai-space.ini"), encoding="utf-8")
     directory = qt_ini_string(cfg.get("smartSpace", "knowledgeDirectory", fallback=""))
     data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
     candidate = (
@@ -85,7 +85,7 @@ def configured_db():
     )
     if not candidate.is_file():
         old_cfg = configparser.ConfigParser(interpolation=None)
-        old_cfg.read(str(config_home() / "kylin/ukui-fences.ini"))
+        old_cfg.read(str(config_home() / "kylin/ukui-fences.ini"), encoding="utf-8")
         old_dir = qt_ini_string(
             old_cfg.get(
                 "smartSpace", "knowledgeDirectory", fallback=str(data / "ukui-fences/knowledge")
@@ -627,7 +627,7 @@ def _indexed_failure_scope(db, path, ignored, category, offset, limit, collect_a
     total = counts[category]
     where = predicate + (" AND e.failure_category=?" if category != "all" else "")
     args = [category] if category != "all" else []
-    fields = "d.id,substr(d.name,1,4096),substr(d.path,1,32768),e.status,substr(e.issues_json,1,16384),e.attempted_at,e.source_signature"
+    fields = "d.id,substr(d.name,1,4096),substr(d.path,1,32768),e.status,substr(e.issues_json,1,16384),e.attempted_at,e.source_signature,e.failure_category"
     query = (
         " FROM extraction_state e JOIN documents d ON d.id=e.document_id "
         + join
@@ -641,7 +641,7 @@ def _indexed_failure_scope(db, path, ignored, category, offset, limit, collect_a
             issues = json.loads(row[4])
         except (ValueError, TypeError):
             issues = ["无法读取旧失败记录"]
-        rows.append((row, issues, failure_category(row[3], issues)))
+        rows.append((row[:7], issues, row[7]))
     ids = [
         r[0]
         for r in db.execute(
