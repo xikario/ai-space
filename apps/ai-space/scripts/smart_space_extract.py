@@ -28,25 +28,29 @@ if VENDOR.is_dir() and str(VENDOR) not in sys.path:
 
 EXTRACTOR_VERSION = "structured-1"
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-TEXT_SUFFIXES = frozenset((
-    ".txt .md .markdown .csv .tsv .json .xml .yaml .yml .ini .conf .log "
-    ".html .htm .css .js .ts .cpp .c .h .hpp .py .sh .desktop .rtf").split())
+TEXT_SUFFIXES = frozenset(
+    (
+        ".txt .md .markdown .csv .tsv .json .xml .yaml .yml .ini .conf .log "
+        ".html .htm .css .js .ts .cpp .c .h .hpp .py .sh .desktop .rtf"
+    ).split()
+)
 OFFICE_SUFFIXES = frozenset(".doc .docx .wps .ppt .pptx .dps .xls .xlsx .et .odt .odp .ods".split())
 IMAGE_SUFFIXES = frozenset(".jpg .jpeg .png .webp .tif .tiff .bmp .gif".split())
 SUPPORTED_SUFFIXES = TEXT_SUFFIXES | OFFICE_SUFFIXES | IMAGE_SUFFIXES | {".pdf"}
 LOG_SUMMARY_THRESHOLD = 1024 * 1024
-OCR_CACHE_LIMIT_BYTES = 512 * 1024**2
+OCR_CACHE_LIMIT_BYTES = 512 * 1024 ** 2
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def parser_version(path):
     # Adding this format must not invalidate every cached document in a large
     # existing library. Plain-text safety changes have their own revision.
-    if Path(path).suffix.lower() in {'.ppt', '.dps'}:
+    if Path(path).suffix.lower() in {".ppt", ".dps"}:
         from legacy_ppt import PARSER_VERSION
-        return EXTRACTOR_VERSION+'+'+PARSER_VERSION
+
+        return EXTRACTOR_VERSION + "+" + PARSER_VERSION
     if Path(path).suffix.lower() in TEXT_SUFFIXES:
-        return EXTRACTOR_VERSION+"+safe-text-2"
+        return EXTRACTOR_VERSION + "+safe-text-2"
     return EXTRACTOR_VERSION
 
 
@@ -84,6 +88,7 @@ def detect_kind(path):
         magic = sample[:8]
     if magic == OLE_MAGIC:
         import olefile
+
         with olefile.OleFileIO(str(path)) as ole:
             if ole.exists("Workbook") or ole.exists("Book"):
                 return "xls"
@@ -100,7 +105,8 @@ def detect_kind(path):
             if "xl/workbook.xml" in names or "xl/sharedStrings.xml" in names:
                 return "xlsx"
             if "ppt/presentation.xml" in names or any(
-                    re.fullmatch(r"ppt/slides/slide\d+\.xml", n) for n in names):
+                re.fullmatch(r"ppt/slides/slide\d+\.xml", n) for n in names
+            ):
                 return "pptx"
             if "content.xml" in names:
                 return "odf"
@@ -121,8 +127,16 @@ class Extraction:
     def __init__(self, path, ocr=False, progress=None):
         self.path = Path(path)
         try:
-            initial=self.path.stat();self.source_revision=(initial.st_dev,initial.st_ino,initial.st_size,initial.st_mtime_ns,initial.st_ctime_ns)
-        except OSError:self.source_revision=None
+            initial = self.path.stat()
+            self.source_revision = (
+                initial.st_dev,
+                initial.st_ino,
+                initial.st_size,
+                initial.st_mtime_ns,
+                initial.st_ctime_ns,
+            )
+        except OSError:
+            self.source_revision = None
         self.ocr = ocr
         self.progress = progress
         self.status = "complete"
@@ -148,7 +162,7 @@ class Extraction:
             if text:
                 if total_chars + len(text) > maximum:
                     self.partial("document_text_limit:%d" % maximum)
-                    text = text[:maximum-total_chars]
+                    text = text[: maximum - total_chars]
                     if text:
                         self.blocks += 1
                         yield locator, text
@@ -171,6 +185,7 @@ class Extraction:
                             styles[sid] = int(attr(el, "val", "0")) + 1
             headings = []
             paragraph = table = 0
+
             def emit_body(element):
                 nonlocal headings, paragraph, table
                 tag = local(element.tag)
@@ -187,7 +202,7 @@ class Extraction:
                             level = styles.get(sid, int(match.group(1)) if match else 0)
                     if value:
                         if level:
-                            headings = headings[:max(0, level - 1)] + [value]
+                            headings = headings[: max(0, level - 1)] + [value]
                         loc = "段落 %d" % paragraph
                         if headings:
                             loc = "章节: %s | %s" % (" > ".join(headings), loc)
@@ -206,6 +221,7 @@ class Extraction:
                     if value:
                         self.partial("nonstandard_body_element:" + tag)
                         yield "正文扩展", value
+
             # Only body children are released: nested table text remains intact
             # until the table is emitted, while large documents do not accumulate.
             with archive.open("word/document.xml") as stream:
@@ -225,6 +241,7 @@ class Extraction:
             # The string pool is kept on disk: a large enterprise directory must
             # not produce a second full in-memory copy during cell reconstruction.
             import sqlite3
+
             with tempfile.TemporaryDirectory(prefix="smart-space-xlsx-") as tmp:
                 pool = sqlite3.connect(str(Path(tmp) / "strings.sqlite"))
                 try:
@@ -239,8 +256,11 @@ class Extraction:
                                 if root is None:
                                     root = element
                                 if event == "end" and local(element.tag) == "si":
-                                    value = "".join(el.text or "" for el in element.iter()
-                                                    if local(el.tag) == "t")
+                                    value = "".join(
+                                        el.text or ""
+                                        for el in element.iter()
+                                        if local(el.tag) == "t"
+                                    )
                                     batch.append((idx, value))
                                     batch_chars += len(value)
                                     if len(batch) >= 256 or batch_chars >= 65536:
@@ -288,7 +308,10 @@ class Extraction:
                                     try:
                                         value = xlsx_cell(cell, pool, epoch, date_styles)
                                     except (ValueError, OverflowError) as error:
-                                        self.partial("cell_format_unresolved:%s!%s:%s" % (sheet_name, ref, error))
+                                        self.partial(
+                                            "cell_format_unresolved:%s!%s:%s"
+                                            % (sheet_name, ref, error)
+                                        )
                                         raw = children(cell, "v")
                                         value = (raw[0].text or "") if raw else ""
                                         if value:
@@ -306,8 +329,10 @@ class Extraction:
                                     parts = []
                                     for col, ref, value in values:
                                         label = headers.get(col, "") if not is_header else ""
-                                        parts.append("%s%s: %s" %
-                                                     (ref, " (%s)" % label if label else "", value))
+                                        parts.append(
+                                            "%s%s: %s"
+                                            % (ref, " (%s)" % label if label else "", value)
+                                        )
                                     yield "工作表:%s 行%s" % (sheet_name, row_no), " | ".join(parts)
                                 if sheet_data is not None:
                                     sheet_data.remove(element)
@@ -332,8 +357,9 @@ class Extraction:
                             self.partial("missing_slide_relationship:" + rid)
             else:
                 self.partial("slide_relationships_missing:natural_order_fallback")
-                order = sorted((n for n in names if re.fullmatch(
-                    r"ppt/slides/slide\d+\.xml", n)), key=natural)
+                order = sorted(
+                    (n for n in names if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)), key=natural
+                )
             for number, member in enumerate(order, 1):
                 if member not in names:
                     self.partial("missing_slide:" + member)
@@ -342,8 +368,10 @@ class Extraction:
                 trees = [el for el in root.iter() if local(el.tag) == "spTree"]
                 title = ""
                 for el in root.iter():
-                    if local(el.tag) == "sp" and any(local(ph.tag) == "ph" and
-                            ph.get("type") in {"title", "ctrTitle"} for ph in el.iter()):
+                    if local(el.tag) == "sp" and any(
+                        local(ph.tag) == "ph" and ph.get("type") in {"title", "ctrTitle"}
+                        for ph in el.iter()
+                    ):
                         title = drawing_text(el)
                         break
                 locator = "第 %d 页%s" % (number, " | " + title[:160] if title else "")
@@ -353,15 +381,19 @@ class Extraction:
                         yield locator, value
                     continue
                 for shape in trees[0]:
-                    if any(local(el.tag) == "ph" and el.get("type") in
-                           {"sldNum", "dt", "ftr", "hdr"} for el in shape.iter()):
+                    if any(
+                        local(el.tag) == "ph" and el.get("type") in {"sldNum", "dt", "ftr", "hdr"}
+                        for el in shape.iter()
+                    ):
                         continue
                     tables = [el for el in shape.iter() if local(el.tag) == "tbl"]
                     if tables:
                         for table_no, table in enumerate(tables, 1):
                             for row_no, row in enumerate(children(table, "tr"), 1):
-                                value = " | ".join("列%d: %s" % (i, drawing_text(cell))
-                                                   for i, cell in enumerate(children(row, "tc"), 1))
+                                value = " | ".join(
+                                    "列%d: %s" % (i, drawing_text(cell))
+                                    for i, cell in enumerate(children(row, "tc"), 1)
+                                )
                                 yield locator + " 表格%d 行%d" % (table_no, row_no), value
                     else:
                         value = drawing_text(shape)
@@ -371,20 +403,22 @@ class Extraction:
     def extract_ppt_binary(self):
         import olefile
         from legacy_ppt import LegacyPresentation
-        self.partial('legacy_ppt:slide_text_only')
+
+        self.partial("legacy_ppt:slide_text_only")
         found = False
         with olefile.OleFileIO(str(self.path)) as ole:
             for number, text in LegacyPresentation(ole).slides():
                 if text.strip():
                     found = True
-                    yield '第 %d 页（旧版演示）' % number, text
+                    yield "第 %d 页（旧版演示）" % number, text
                 else:
-                    self.partial('legacy_ppt_page_without_text:%d' % number)
+                    self.partial("legacy_ppt_page_without_text:%d" % number)
         if not found:
-            raise ValueError('旧版演示文稿中未找到可提取的文字；可能为图片型页面，请转换为 PDF 后进行 OCR')
+            raise ValueError("旧版演示文稿中未找到可提取的文字；可能为图片型页面，请转换为 PDF 后进行 OCR")
 
     def extract_xls(self):
         import xlrd
+
         workbook = xlrd.open_workbook(str(self.path), on_demand=True)
         try:
             for name in workbook.sheet_names():
@@ -397,7 +431,9 @@ class Extraction:
                         if kind in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
                             continue
                         if kind == xlrd.XL_CELL_DATE:
-                            value = xlrd.xldate_as_datetime(value, workbook.datemode).isoformat(sep=" ")
+                            value = xlrd.xldate_as_datetime(value, workbook.datemode).isoformat(
+                                sep=" "
+                            )
                         elif kind == xlrd.XL_CELL_BOOLEAN:
                             value = "TRUE" if value else "FALSE"
                         elif kind == xlrd.XL_CELL_ERROR:
@@ -413,8 +449,15 @@ class Extraction:
                     parts = []
                     for col, value in values:
                         label = headers.get(col, "") if not is_header else ""
-                        parts.append("%s%d%s: %s" % (column_name(col), row_no + 1,
-                            " (%s)" % label if label else "", value))
+                        parts.append(
+                            "%s%d%s: %s"
+                            % (
+                                column_name(col),
+                                row_no + 1,
+                                " (%s)" % label if label else "",
+                                value,
+                            )
+                        )
                     if parts:
                         yield "工作表:%s 行%d" % (name, row_no + 1), " | ".join(parts)
                 if hasattr(workbook, "unload_sheet"):
@@ -426,6 +469,7 @@ class Extraction:
         # Recover only the Word main story via its piece table. Reading arbitrary
         # binary strings would index embedded images, font tables and stale text.
         import olefile
+
         self.partial("legacy_word:main_text_only;layout_not_preserved")
         with olefile.OleFileIO(str(self.path)) as ole:
             word = ole.openstream("WordDocument").read()
@@ -456,7 +500,7 @@ class Extraction:
             if at >= len(clx) or clx[at] != 2:
                 raise ValueError("Word piece table missing")
             length = struct.unpack_from("<I", clx, at + 1)[0]
-            plc = clx[at + 5:at + 5 + length]
+            plc = clx[at + 5 : at + 5 + length]
             pieces = (length - 4) // 12
             if len(plc) != length or pieces < 1 or (length - 4) % 12:
                 raise ValueError("invalid Word piece table")
@@ -469,10 +513,10 @@ class Extraction:
                     break
                 offset = struct.unpack_from("<I", plc, 4 * (pieces + 1) + i * 8 + 2)[0]
                 compressed = bool(offset & 0x40000000)
-                offset &= 0x3fffffff
+                offset &= 0x3FFFFFFF
                 if compressed:
                     offset //= 2
-                raw = word[offset:offset + count * (1 if compressed else 2)]
+                raw = word[offset : offset + count * (1 if compressed else 2)]
                 if len(raw) != count * (1 if compressed else 2):
                     raise ValueError("truncated Word text piece")
                 value = raw.decode("cp1252" if compressed else "utf-16le", errors="replace")
@@ -482,8 +526,8 @@ class Extraction:
                     split = buffer.find("\r")
                     if split < 0 or split > 8192:
                         split = 8192
-                    skip = 1 if buffer[split:split + 1] == "\r" else 0
-                    line, buffer = buffer[:split], buffer[split + skip:]
+                    skip = 1 if buffer[split : split + 1] == "\r" else 0
+                    line, buffer = buffer[:split], buffer[split + skip :]
                     line = re.sub("\x13[^\x14\x15]*(?:\x14)?", "", line).replace("\x15", "")
                     line = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", line)
                     if line.strip():
@@ -499,9 +543,13 @@ class Extraction:
             raise RuntimeError("pdftotext not installed")
         with tempfile.TemporaryDirectory(prefix="smart-space-pdf-") as tmp:
             target = Path(tmp) / "text.txt"
-            result = subprocess.run([pdftotext, "-layout", "-enc", "UTF-8", str(self.path), str(target)],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    timeout=180, check=False)
+            result = subprocess.run(
+                [pdftotext, "-layout", "-enc", "UTF-8", str(self.path), str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=180,
+                check=False,
+            )
             if result.returncode:
                 detail = result.stderr[:300].decode("utf-8", errors="replace").strip()
                 raise RuntimeError("pdftotext failed (%d): %s" % (result.returncode, detail))
@@ -536,36 +584,68 @@ class Extraction:
             self.progress(dict(unit="pages", value=page))
 
     def read_ocr_cache(self, page):
-        directory=os.environ.get("AI_SPACE_OCR_CACHE_DIR")
-        if not directory or os.environ.get("AI_SPACE_OCR_BYPASS_CACHE")=="1":return None
-        path=self.ocr_cache_path(page)
+        directory = os.environ.get("AI_SPACE_OCR_CACHE_DIR")
+        if not directory or os.environ.get("AI_SPACE_OCR_BYPASS_CACHE") == "1":
+            return None
+        path = self.ocr_cache_path(page)
         try:
-            if path.is_file() and not path.is_symlink() and path.stat().st_size<=2*1024**2:
+            if path.is_file() and not path.is_symlink() and path.stat().st_size <= 2 * 1024 ** 2:
                 return path.read_text(encoding="utf-8")
-        except (OSError,UnicodeError):pass
+        except (OSError, UnicodeError):
+            pass
         return None
 
-    def ocr_cache_path(self,page):
-        info=self.path.stat()
-        if self.source_revision!=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns):raise RuntimeError("source changed during OCR; cached pages not reused")
-        key=hashlib.sha256((str(self.path.resolve())+"|"+str(self.source_revision)+"|"+str(page)+"|"+EXTRACTOR_VERSION+"|"+os.environ.get("AI_SPACE_OCR_LANGUAGES","chi_sim+eng")).encode()).hexdigest()
-        return Path(os.environ["AI_SPACE_OCR_CACHE_DIR"])/(key+".txt")
+    def ocr_cache_path(self, page):
+        info = self.path.stat()
+        if self.source_revision != (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ):
+            raise RuntimeError("source changed during OCR; cached pages not reused")
+        key = hashlib.sha256(
+            (
+                str(self.path.resolve())
+                + "|"
+                + str(self.source_revision)
+                + "|"
+                + str(page)
+                + "|"
+                + EXTRACTOR_VERSION
+                + "|"
+                + os.environ.get("AI_SPACE_OCR_LANGUAGES", "chi_sim+eng")
+            ).encode()
+        ).hexdigest()
+        return Path(os.environ["AI_SPACE_OCR_CACHE_DIR"]) / (key + ".txt")
 
-    def save_ocr_cache(self,page,text):
-        directory=os.environ.get("AI_SPACE_OCR_CACHE_DIR")
-        if not directory or len(text.encode("utf-8"))>2*1024**2:return
+    def save_ocr_cache(self, page, text):
+        directory = os.environ.get("AI_SPACE_OCR_CACHE_DIR")
+        if not directory or len(text.encode("utf-8")) > 2 * 1024 ** 2:
+            return
         from knowledge_library import storage_plan
-        storage_plan(directory,0,float(os.environ.get("AI_SPACE_RESERVE_GIB","2")),float(os.environ.get("AI_SPACE_MAX_GIB","32")))
+
+        storage_plan(
+            directory,
+            0,
+            float(os.environ.get("AI_SPACE_RESERVE_GIB", "2")),
+            float(os.environ.get("AI_SPACE_MAX_GIB", "32")),
+        )
         from ocr_cache import save
         import sqlite3
-        try:save(self.ocr_cache_path(page), text, OCR_CACHE_LIMIT_BYTES)
-        except (OSError,sqlite3.Error):self.partial("ocr_cache_unavailable")
 
-    def ocr_page(self,page,tmp):
-        cached=self.read_ocr_cache(page)
-        if cached is not None:return cached
-        result=self._ocr_page(page,tmp)
-        self.save_ocr_cache(page,result)
+        try:
+            save(self.ocr_cache_path(page), text, OCR_CACHE_LIMIT_BYTES)
+        except (OSError, sqlite3.Error):
+            self.partial("ocr_cache_unavailable")
+
+    def ocr_page(self, page, tmp):
+        cached = self.read_ocr_cache(page)
+        if cached is not None:
+            return cached
+        result = self._ocr_page(page, tmp)
+        self.save_ocr_cache(page, result)
         return result
 
     def _ocr_page(self, page, tmp):
@@ -575,12 +655,27 @@ class Extraction:
         image = Path(str(prefix) + ".png")
         value = Path(tmp) / "ocr.txt"
         try:
-            result = run_ocr(["pdftoppm", "-f", str(page), "-l", str(page),
-                "-singlefile", "-r", "150", "-png", str(self.path), str(prefix)],
-                stdout=subprocess.DEVNULL, timeout=180)
+            result = run_ocr(
+                [
+                    "pdftoppm",
+                    "-f",
+                    str(page),
+                    "-l",
+                    str(page),
+                    "-singlefile",
+                    "-r",
+                    "150",
+                    "-png",
+                    str(self.path),
+                    str(prefix),
+                ],
+                stdout=subprocess.DEVNULL,
+                timeout=180,
+            )
             if result.returncode or not image.exists():
                 raise RuntimeError("PDF page rendering failed: %d" % page)
             from ocr_environment import command
+
             run_to_file(command(image), str(value), 120)
             return value.read_text(encoding="utf-8")
         finally:
@@ -593,41 +688,48 @@ class Extraction:
             return
         if not shutil.which("tesseract"):
             raise RuntimeError("tesseract not installed")
-        cached=self.read_ocr_cache("image")
+        cached = self.read_ocr_cache("image")
         if cached is not None:
-            yield "图片全文（OCR）",cached
+            yield "图片全文（OCR）", cached
             return
         with tempfile.TemporaryDirectory(prefix="smart-space-image-") as tmp:
             text = Path(tmp) / "ocr.txt"
             from ocr_environment import command
+
             run_to_file(command(self.path), str(text), 120)
-            value=text.read_text(encoding="utf-8")
-            self.save_ocr_cache("image",value)
+            value = text.read_text(encoding="utf-8")
+            self.save_ocr_cache("image", value)
             yield "图片全文（OCR）", value
 
     def extract_rtf(self):
         from rtf_text import visible_text
+
         maximum = max(65536, document_char_limit() * 4)
         with open_regular_binary(self.path) as source:
             value = source.read(maximum + 1)
-        self.partial('rtf:visible_text_only')
+        self.partial("rtf:visible_text_only")
         if len(value) > maximum:
-            self.partial('document_input_limit')
+            self.partial("document_input_limit")
             value = value[:maximum]
         text = visible_text(value)
         for start in range(0, len(text), 65536):
-            yield 'RTF 正文', text[start:start + 65536]
+            yield "RTF 正文", text[start : start + 65536]
 
     def extract_text(self):
-        summary = self.path.suffix.lower() == ".log" and self.path.stat().st_size > LOG_SUMMARY_THRESHOLD
+        summary = (
+            self.path.suffix.lower() == ".log" and self.path.stat().st_size > LOG_SUMMARY_THRESHOLD
+        )
         if summary:
             self.partial("large_log_summary:head_errors_context_tail")
         tail = deque(maxlen=100)
         context = deque(maxlen=3)
         following = 0
         emitted_until = 0
-        for no, line in text_lines(self.path, lambda: self.partial("decode_errors_replaced"),
-                                   lambda: self.partial("document_input_limit")):
+        for no, line in text_lines(
+            self.path,
+            lambda: self.partial("decode_errors_replaced"),
+            lambda: self.partial("document_input_limit"),
+        ):
             if not summary:
                 yield "行 %d" % no, line
                 continue
@@ -670,7 +772,9 @@ class Extraction:
                             yield "ODF 段落 %d" % no, value
                         if parent is not None:
                             parent.remove(el)
-                    elif parent is not None and not any(local(ancestor.tag) in {"p", "h"} for ancestor in stack):
+                    elif parent is not None and not any(
+                        local(ancestor.tag) in {"p", "h"} for ancestor in stack
+                    ):
                         parent.remove(el)
 
 
@@ -678,8 +782,10 @@ def word_text(element):
     def walk(el):
         if local(el.tag) in {"instrText", "del", "delText"}:
             return ""
-        if local(el.tag) == "r" and any(local(v.tag) == "vanish" and
-                attr(v, "val", "true").lower() not in {"0", "false", "off"} for v in el.iter()):
+        if local(el.tag) == "r" and any(
+            local(v.tag) == "vanish" and attr(v, "val", "true").lower() not in {"0", "false", "off"}
+            for v in el.iter()
+        ):
             return ""
         if local(el.tag) == "t":
             return el.text or ""
@@ -688,6 +794,7 @@ def word_text(element):
         if local(el.tag) in {"br", "cr"}:
             return "\n"
         return "".join(walk(child) for child in el)
+
     return walk(element).strip()
 
 
@@ -697,16 +804,20 @@ def word_table(table):
         values = []
         row_headers = {}
         col = 1
-        before = next((attr(el, "val", "0") for el in row.iter() if local(el.tag) == "gridBefore"), "0")
+        before = next(
+            (attr(el, "val", "0") for el in row.iter() if local(el.tag) == "gridBefore"), "0"
+        )
         col += int(before)
         for cell in children(row, "tc"):
             text = " / ".join(word_text(p) for p in cell if local(p.tag) == "p" and word_text(p))
             for nested in children(cell, "tbl"):
                 text += " / " + " / ".join("嵌套表格行%d %s" % (n, v) for n, v in word_table(nested))
-            span = next((int(attr(el, "val", "1")) for el in cell.iter()
-                         if local(el.tag) == "gridSpan"), 1)
-            merge = next((attr(el, "val", "continue") for el in cell.iter()
-                          if local(el.tag) == "vMerge"), "")
+            span = next(
+                (int(attr(el, "val", "1")) for el in cell.iter() if local(el.tag) == "gridSpan"), 1
+            )
+            merge = next(
+                (attr(el, "val", "continue") for el in cell.iter() if local(el.tag) == "vMerge"), ""
+            )
             label = "列%d" % col
             if span > 1:
                 label += "-%d" % (col + span - 1)
@@ -727,8 +838,9 @@ def word_table(table):
 def drawing_text(element):
     paragraphs = [el for el in element.iter() if local(el.tag) == "p"]
     if paragraphs:
-        return "\n".join("".join(el.text or "" for el in p.iter() if local(el.tag) == "t")
-                         for p in paragraphs).strip()
+        return "\n".join(
+            "".join(el.text or "" for el in p.iter() if local(el.tag) == "t") for p in paragraphs
+        ).strip()
     return " ".join(el.text or "" for el in element.iter() if local(el.tag) == "t").strip()
 
 
@@ -736,19 +848,30 @@ def relationships(archive, member):
     directory, name = posixpath.split(member)
     rel_path = posixpath.join(directory, "_rels", name + ".rels")
     root = ET.fromstring(ET.member(archive, rel_path))
-    return {el.get("Id"): posixpath.normpath(posixpath.join(directory, el.get("Target", "")))
-            if not el.get("Target", "").startswith("/") else el.get("Target").lstrip("/")
-            for el in root if el.get("TargetMode") != "External"}
+    return {
+        el.get("Id"): posixpath.normpath(posixpath.join(directory, el.get("Target", "")))
+        if not el.get("Target", "").startswith("/")
+        else el.get("Target").lstrip("/")
+        for el in root
+        if el.get("TargetMode") != "External"
+    }
 
 
 def workbook_sheets(archive):
     names = set(archive.namelist())
     if "xl/workbook.xml" not in names:
-        return [(Path(n).stem, n) for n in sorted(names, key=natural)
-                if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)], False
+        return (
+            [
+                (Path(n).stem, n)
+                for n in sorted(names, key=natural)
+                if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)
+            ],
+            False,
+        )
     root = ET.fromstring(ET.member(archive, "xl/workbook.xml"))
-    date1904 = any(local(el.tag) == "workbookPr" and el.get("date1904") in {"1", "true"}
-                   for el in root.iter())
+    date1904 = any(
+        local(el.tag) == "workbookPr" and el.get("date1904") in {"1", "true"} for el in root.iter()
+    )
     rels = relationships(archive, "xl/workbook.xml")
     result = []
     for el in root.iter():
@@ -764,14 +887,19 @@ def workbook_date_styles(archive):
     if "xl/styles.xml" not in archive.namelist():
         return set()
     root = ET.fromstring(ET.member(archive, "xl/styles.xml"))
-    custom = {int(el.get("numFmtId")): el.get("formatCode", "")
-              for el in root.iter() if local(el.tag) == "numFmt"}
+    custom = {
+        int(el.get("numFmtId")): el.get("formatCode", "")
+        for el in root.iter()
+        if local(el.tag) == "numFmt"
+    }
     styles = set()
     for group in children(root, "cellXfs"):
         for i, el in enumerate(group):
             n = int(el.get("numFmtId", "0"))
             pattern = re.sub(r'"[^\"]*"|\\.|\[[^\]]*\]', "", custom.get(n, ""))
-            if n in set(range(14, 23)) | set(range(27, 37)) | set(range(45, 48)) | set(range(50, 59)) or re.search(r"[ydhs]", pattern, re.I):
+            if n in set(range(14, 23)) | set(range(27, 37)) | set(range(45, 48)) | set(
+                range(50, 59)
+            ) or re.search(r"[ydhs]", pattern, re.I):
                 styles.add(i)
     return styles
 

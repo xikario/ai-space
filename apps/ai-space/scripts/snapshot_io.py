@@ -15,13 +15,13 @@ MAX_VALUE = 16 * 1024 * 1024
 class JsonReader:
     def __init__(self, source):
         self.source = source
-        self.buffer = ''
+        self.buffer = ""
         self.position = 0
         self.eof = False
         self.decoder = json.JSONDecoder()
 
     def more(self):
-        self.buffer = self.buffer[self.position:]
+        self.buffer = self.buffer[self.position :]
         self.position = 0
         value = self.source.read(65536)
         self.eof = not value
@@ -34,12 +34,12 @@ class JsonReader:
             if self.position < len(self.buffer):
                 return self.buffer[self.position]
             if self.eof:
-                return ''
+                return ""
             self.more()
 
     def take(self, expected):
         if self.peek() != expected:
-            raise ValueError('Invalid snapshot JSON structure')
+            raise ValueError("Invalid snapshot JSON structure")
         self.position += 1
 
     def value(self):
@@ -55,46 +55,46 @@ class JsonReader:
                 return value
             except json.JSONDecodeError:
                 if self.eof or len(self.buffer) - self.position > MAX_VALUE:
-                    raise ValueError('Invalid or oversized snapshot JSON value')
+                    raise ValueError("Invalid or oversized snapshot JSON value")
                 self.more()
 
 
 def records(path, header_only=False):
-    with open_regular_binary(path) as raw, io.TextIOWrapper(raw, encoding='utf-8-sig') as source:
+    with open_regular_binary(path) as raw, io.TextIOWrapper(raw, encoding="utf-8-sig") as source:
         reader = JsonReader(source)
-        reader.take('{')
+        reader.take("{")
         seen = set()
         generated = False
-        while reader.peek() != '}':
+        while reader.peek() != "}":
             key = reader.value()
             if not isinstance(key, str) or key in seen:
-                raise ValueError('Invalid or duplicate snapshot metadata key')
+                raise ValueError("Invalid or duplicate snapshot metadata key")
             seen.add(key)
-            reader.take(':')
-            if key == 'items':
+            reader.take(":")
+            if key == "items":
                 if header_only and generated:
                     return
-                reader.take('[')
-                while reader.peek() != ']':
+                reader.take("[")
+                while reader.peek() != "]":
                     value = reader.value()
                     if not isinstance(value, dict):
-                        raise ValueError('Invalid snapshot item')
+                        raise ValueError("Invalid snapshot item")
                     if not header_only:
-                        yield 'item', value
-                    if reader.peek() == ']':
+                        yield "item", value
+                    if reader.peek() == "]":
                         break
-                    reader.take(',')
-                reader.take(']')
+                    reader.take(",")
+                reader.take("]")
             else:
                 value = reader.value()
-                generated = generated or key == 'generation'
+                generated = generated or key == "generation"
                 yield key, value
-            if reader.peek() == '}':
+            if reader.peek() == "}":
                 break
-            reader.take(',')
-        reader.take('}')
+            reader.take(",")
+        reader.take("}")
         if reader.peek():
-            raise ValueError('Trailing snapshot JSON data')
+            raise ValueError("Trailing snapshot JSON data")
 
 
 def metadata(path):
@@ -103,34 +103,41 @@ def metadata(path):
 
 class ReuseMap(MutableMapping):
     """Keep large previous bodies off the Python heap during an incremental scan."""
+
     def __init__(self, directory=None):
-        self.temporary = tempfile.TemporaryDirectory(prefix='.ai-space-reuse-', dir=disposable_owner(directory))
-        self.owner=hold_owner(self.temporary)
-        self.db = sqlite3.connect(str(Path(self.temporary.name) / 'items.sqlite'))
-        self.db.executescript('''PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix=".ai-space-reuse-", dir=disposable_owner(directory)
+        )
+        self.owner = hold_owner(self.temporary)
+        self.db = sqlite3.connect(str(Path(self.temporary.name) / "items.sqlite"))
+        self.db.executescript(
+            """PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
             PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
-            CREATE TABLE items(path TEXT PRIMARY KEY,json TEXT NOT NULL);''')
+            CREATE TABLE items(path TEXT PRIMARY KEY,json TEXT NOT NULL);"""
+        )
 
     def __getitem__(self, key):
-        row = self.db.execute('SELECT json FROM items WHERE path=?', (key,)).fetchone()
+        row = self.db.execute("SELECT json FROM items WHERE path=?", (key,)).fetchone()
         if row is None:
             raise KeyError(key)
         return json.loads(row[0])
 
     def __setitem__(self, key, value):
-        self.db.execute('INSERT OR REPLACE INTO items VALUES(?,?)',
-                        (key, json.dumps(value, ensure_ascii=False, separators=(',', ':'))))
+        self.db.execute(
+            "INSERT OR REPLACE INTO items VALUES(?,?)",
+            (key, json.dumps(value, ensure_ascii=False, separators=(",", ":"))),
+        )
 
     def __delitem__(self, key):
-        if not self.db.execute('DELETE FROM items WHERE path=?', (key,)).rowcount:
+        if not self.db.execute("DELETE FROM items WHERE path=?", (key,)).rowcount:
             raise KeyError(key)
 
     def __iter__(self):
-        for row in self.db.execute('SELECT path FROM items'):
+        for row in self.db.execute("SELECT path FROM items"):
             yield row[0]
 
     def __len__(self):
-        return self.db.execute('SELECT count(*) FROM items').fetchone()[0]
+        return self.db.execute("SELECT count(*) FROM items").fetchone()[0]
 
     def close(self):
         if self.db is not None:
@@ -146,85 +153,130 @@ class ReuseMap(MutableMapping):
 
 class RecordList:
     """A replayable on-disk sequence for large inventories and OCR queues."""
+
     def __init__(self, directory=None):
-        self.temporary=tempfile.TemporaryDirectory(prefix='.ai-space-records-',dir=disposable_owner(directory))
-        self.owner=hold_owner(self.temporary)
-        self.db=sqlite3.connect(str(Path(self.temporary.name)/'records.sqlite'))
-        self.db.executescript('''PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix=".ai-space-records-", dir=disposable_owner(directory)
+        )
+        self.owner = hold_owner(self.temporary)
+        self.db = sqlite3.connect(str(Path(self.temporary.name) / "records.sqlite"))
+        self.db.executescript(
+            """PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
             PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
             CREATE TABLE records(position INTEGER PRIMARY KEY,json TEXT,size INTEGER,path TEXT);
-            CREATE INDEX records_size ON records(size,path);''')
-        self.ordered=False
-        self.count=0
+            CREATE INDEX records_size ON records(size,path);"""
+        )
+        self.ordered = False
+        self.count = 0
 
-    def __len__(self):return self.count
+    def __len__(self):
+        return self.count
 
     def append(self, value):
-        self.db.execute('INSERT INTO records VALUES(?,?,?,?)',
-                        (self.count,json.dumps(value,ensure_ascii=False,separators=(',',':')),
-                         int(value.get('size',0) or 0),str(value.get('path',''))))
-        self.count+=1
+        self.db.execute(
+            "INSERT INTO records VALUES(?,?,?,?)",
+            (
+                self.count,
+                json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                int(value.get("size", 0) or 0),
+                str(value.get("path", "")),
+            ),
+        )
+        self.count += 1
 
     def extend(self, values):
-        for value in values:self.append(value)
+        for value in values:
+            self.append(value)
 
     def __iter__(self):
-        order='size,path COLLATE NOCASE' if self.ordered else 'position'
-        for row in self.db.execute('SELECT json FROM records ORDER BY '+order):yield json.loads(row[0])
+        order = "size,path COLLATE NOCASE" if self.ordered else "position"
+        for row in self.db.execute("SELECT json FROM records ORDER BY " + order):
+            yield json.loads(row[0])
 
     def __getitem__(self, position):
-        if position<0:position+=self.count
-        row=self.db.execute('SELECT json FROM records WHERE position=?',(position,)).fetchone()
-        if not row:raise IndexError(position)
+        if position < 0:
+            position += self.count
+        row = self.db.execute("SELECT json FROM records WHERE position=?", (position,)).fetchone()
+        if not row:
+            raise IndexError(position)
         return json.loads(row[0])
 
     def __setitem__(self, position, value):
-        if position<0:position+=self.count
-        if not 0<=position<self.count:raise IndexError(position)
-        self.db.execute('UPDATE records SET json=?,size=?,path=? WHERE position=?',
-                        (json.dumps(value,ensure_ascii=False,separators=(',',':')),
-                         int(value.get('size',0) or 0),str(value.get('path','')),position))
+        if position < 0:
+            position += self.count
+        if not 0 <= position < self.count:
+            raise IndexError(position)
+        self.db.execute(
+            "UPDATE records SET json=?,size=?,path=? WHERE position=?",
+            (
+                json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                int(value.get("size", 0) or 0),
+                str(value.get("path", "")),
+                position,
+            ),
+        )
 
     def truncate(self, count):
-        self.db.execute('DELETE FROM records WHERE position>=?',(count,));self.count=min(self.count,count)
+        self.db.execute("DELETE FROM records WHERE position>=?", (count,))
+        self.count = min(self.count, count)
 
-    def sort_by_size(self):self.ordered=True
+    def sort_by_size(self):
+        self.ordered = True
 
     def close(self):
         if self.db is not None:
-            self.db.close();self.db=None;self.temporary.cleanup();self.owner.close()
+            self.db.close()
+            self.db = None
+            self.temporary.cleanup()
+            self.owner.close()
 
     def __del__(self):
-        with contextlib.suppress(Exception):self.close()
+        with contextlib.suppress(Exception):
+            self.close()
 
 
 _CLEANED = set()
+
 
 def disposable_owner(directory):
     """Recover only our abandoned scratch caches, never personal libraries."""
     import fcntl
     import shutil
-    root=Path(directory) if directory is not None else Path(tempfile.gettempdir())
-    key=str(root.resolve())
+
+    root = Path(directory) if directory is not None else Path(tempfile.gettempdir())
+    key = str(root.resolve())
     if key not in _CLEANED:
         _CLEANED.add(key)
         for path in root.iterdir():
-            if not path.name.startswith(('.ai-space-reuse-','.ai-space-records-')) or path.is_symlink() or not path.is_dir():continue
-            marker=path/'.owner'
+            if (
+                not path.name.startswith((".ai-space-reuse-", ".ai-space-records-"))
+                or path.is_symlink()
+                or not path.is_dir()
+            ):
+                continue
+            marker = path / ".owner"
             try:
-                if marker.is_symlink():continue
-                with marker.open('r+b') as handle:
-                    if handle.read(64)!=b'ai-space-disposable-cache-v1':continue
-                    try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                    except BlockingIOError:continue
+                if marker.is_symlink():
+                    continue
+                with marker.open("r+b") as handle:
+                    if handle.read(64) != b"ai-space-disposable-cache-v1":
+                        continue
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
                     shutil.rmtree(path)
-            except (OSError,ValueError):pass
+            except (OSError, ValueError):
+                pass
     return root
 
 
 def hold_owner(temporary):
     import fcntl
-    marker=Path(temporary.name)/'.owner'
-    handle=marker.open('x+b');fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    handle.write(b'ai-space-disposable-cache-v1');handle.flush()
+
+    marker = Path(temporary.name) / ".owner"
+    handle = marker.open("x+b")
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    handle.write(b"ai-space-disposable-cache-v1")
+    handle.flush()
     return handle

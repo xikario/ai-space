@@ -26,10 +26,8 @@ def text(value):
 
 def make_stream(path):
     items = [
-        ("/docs/宁波银行2025年度报告.pdf", "宁波银行2025年度报告.pdf",
-         "PDF", "宁波银行在2025年年度报告中披露资产质量与经营情况。"),
-        ("/docs/银河麒麟安全测评.docx", "银河麒麟安全测评.docx",
-         "document", "银河麒麟操作系统通过安全可靠测评。"),
+        ("/docs/宁波银行2025年度报告.pdf", "宁波银行2025年度报告.pdf", "PDF", "宁波银行在2025年年度报告中披露资产质量与经营情况。"),
+        ("/docs/银河麒麟安全测评.docx", "银河麒麟安全测评.docx", "document", "银河麒麟操作系统通过安全可靠测评。"),
     ]
     with gzip.open(path, "wb") as stream:
         stream.write(b"UKFIDX1\n")
@@ -42,8 +40,7 @@ def make_stream(path):
             stream.write(b"\0")
             stream.write(struct.pack("<q", 100))
             stream.write(struct.pack("<q", 1000))
-            for value in (item_path, "/docs", name, category, content,
-                          "test", "done", ""):
+            for value in (item_path, "/docs", name, category, content, "test", "done", ""):
                 stream.write(text(value))
 
 
@@ -51,10 +48,13 @@ class KnowledgeWorkerTest(unittest.TestCase):
     def run_worker(self, *arguments, env=None, check=True):
         completed = subprocess.run(
             [sys.executable, WORKER, *arguments],
-            check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=env)
-        lines = [json.loads(line) for line in completed.stdout.splitlines()
-                 if line.strip()]
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        lines = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
         return completed, lines
 
     def test_build_search_and_resume(self):
@@ -63,61 +63,87 @@ class KnowledgeWorkerTest(unittest.TestCase):
             db = os.path.join(directory, "knowledge.sqlite")
             make_stream(stream)
             build = subprocess.run(
-                [sys.executable, WORKER, "build", "--index-stream", stream,
-                 "--db", db, "--chunk-size", "300", "--overlap", "30"],
-                check=True, stdout=subprocess.PIPE, text=True)
+                [
+                    sys.executable,
+                    WORKER,
+                    "build",
+                    "--index-stream",
+                    stream,
+                    "--db",
+                    db,
+                    "--chunk-size",
+                    "300",
+                    "--overlap",
+                    "30",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
             final = json.loads(build.stdout.strip().splitlines()[-1])
             self.assertEqual(final["documents"], 2)
             self.assertGreaterEqual(final["chunks"], 2)
-            self.assertEqual(
-                stat.S_IMODE(os.stat(db).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(db).st_mode), 0o600)
 
             search = subprocess.run(
-                [sys.executable, WORKER, "search", "--db", db,
-                 "--query", "宁波银行 2025 报告"],
-                check=True, stdout=subprocess.PIPE, text=True)
+                [sys.executable, WORKER, "search", "--db", db, "--query", "宁波银行 2025 报告"],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
             result = json.loads(search.stdout)
-            self.assertEqual(result["results"][0]["name"],
-                             "宁波银行2025年度报告.pdf")
+            self.assertEqual(result["results"][0]["name"], "宁波银行2025年度报告.pdf")
             self.assertGreaterEqual(result["results"][0]["score"], 65)
 
             second = subprocess.run(
-                [sys.executable, WORKER, "build", "--index-stream", stream,
-                 "--db", db, "--chunk-size", "300", "--overlap", "30"],
-                check=True, stdout=subprocess.PIPE, text=True)
+                [
+                    sys.executable,
+                    WORKER,
+                    "build",
+                    "--index-stream",
+                    stream,
+                    "--db",
+                    db,
+                    "--chunk-size",
+                    "300",
+                    "--overlap",
+                    "30",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
             resumed = json.loads(second.stdout.strip().splitlines()[-1])
             self.assertEqual(resumed["updated"], 0)
             self.assertEqual(resumed["reused"], 2)
             with sqlite3.connect(db) as handle:
-                self.assertEqual(handle.execute(
-                    "PRAGMA integrity_check").fetchone()[0], "ok")
+                self.assertEqual(handle.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                 schema_version = handle.execute(
                     "SELECT value FROM meta WHERE key='schema_version'"
                 ).fetchone()[0]
                 self.assertEqual(schema_version, "2")
                 document_columns = {
-                    row[1] for row in handle.execute(
-                        "PRAGMA table_info(documents)")
+                    row[1] for row in handle.execute("PRAGMA table_info(documents)")
                 }
                 self.assertNotIn("summary", document_columns)
                 self.assertNotIn("metadata_json", document_columns)
-                self.assertEqual(handle.execute(
-                    """SELECT COUNT(*) FROM chunks_fts AS f
+                self.assertEqual(
+                    handle.execute(
+                        """SELECT COUNT(*) FROM chunks_fts AS f
                        LEFT JOIN chunks AS c ON c.id=f.chunk_id
-                       WHERE c.id IS NULL""").fetchone()[0], 0)
+                       WHERE c.id IS NULL"""
+                    ).fetchone()[0],
+                    0,
+                )
 
     def test_long_query_relaxes_only_after_strict_search_is_empty(self):
         with tempfile.TemporaryDirectory() as directory:
             stream = os.path.join(directory, "index.gz")
             db = os.path.join(directory, "knowledge.sqlite")
             make_stream(stream)
-            self.run_worker(
-                "build", "--index-stream", stream, "--db", db)
-            _completed, lines = self.run_worker(
-                "search", "--db", db,
-                "--query", "宁波银行经营分析报告")
-            self.assertEqual(lines[-1]["results"][0]["name"],
-                             "宁波银行2025年度报告.pdf")
+            self.run_worker("build", "--index-stream", stream, "--db", db)
+            _completed, lines = self.run_worker("search", "--db", db, "--query", "宁波银行经营分析报告")
+            self.assertEqual(lines[-1]["results"][0]["name"], "宁波银行2025年度报告.pdf")
             self.assertTrue(lines[-1]["results"][0]["relaxed"])
             self.assertLess(lines[-1]["results"][0]["score"], 95)
 
@@ -128,18 +154,19 @@ class KnowledgeWorkerTest(unittest.TestCase):
             with open(legacy, "wb") as handle:
                 handle.truncate(KNOWLEDGE.MAX_LEGACY_JSON_BYTES + 1)
             completed, lines = self.run_worker(
-                "build", "--index-json", legacy, "--db", db, check=False)
+                "build", "--index-json", legacy, "--db", db, check=False
+            )
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("snapshot JSON", lines[-1]["error"])
-            self.assertFalse(os.path.exists(db), 'invalid inventory must not create or change the database')
+            self.assertFalse(
+                os.path.exists(db), "invalid inventory must not create or change the database"
+            )
             with KNOWLEDGE.open_db(db) as handle:
                 handle.commit()
             with sqlite3.connect(db) as handle:
-                handle.execute(
-                    "UPDATE meta SET value='999' WHERE key='schema_version'")
+                handle.execute("UPDATE meta SET value='999' WHERE key='schema_version'")
                 handle.commit()
-            completed, lines = self.run_worker(
-                "stats", "--db", db, check=False)
+            completed, lines = self.run_worker("stats", "--db", db, check=False)
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("unsupported knowledge schema", lines[-1]["error"])
 
