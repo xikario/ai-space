@@ -52,4 +52,5 @@ class KnowledgeManagerDialog final : public QDialog
     QLabel *m_space;
     QLabel *m_message;
     bool m_managementBusy = false;
+    QString m_notice;
 };

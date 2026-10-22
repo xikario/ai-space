@@ -41,6 +41,7 @@ PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中�
 
 - [知识库 v1：存储、AIKB、SKILL 与建库向导](docs/KNOWLEDGE_LIBRARIES.md)
 - [构建、测试与验证边界](docs/TESTING.md)
+- [核心代码导航与运行边界](docs/ARCHITECTURE.md)
 - [失败项重试、忽略与恢复](docs/FAILURES.md)
 - [索引、检索与界面](docs/SMART_SPACE.md)
 - [知识库与命令行](docs/SMART_SPACE_KNOWLEDGE.md)

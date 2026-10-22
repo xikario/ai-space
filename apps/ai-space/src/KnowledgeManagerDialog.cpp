@@ -285,6 +285,7 @@ KnowledgeManagerDialog::KnowledgeManagerDialog(const QString &directory, const Q
     layout->addLayout(mountActions);
     m_message = new QLabel;
     m_message->setWordWrap(true);
+    m_message->setTextFormat(Qt::PlainText);
     layout->addWidget(m_message);
     const QString libraryScript =
         QFileInfo(worker).dir().filePath(QStringLiteral("knowledge_library.py"));
@@ -308,11 +309,14 @@ KnowledgeManagerDialog::KnowledgeManagerDialog(const QString &directory, const Q
                 QStringList warnings;
                 for (const auto &warning : data.value("registryWarnings").toArray())
                     warnings << warning.toString();
-                m_message->setText(
-                    warnings.isEmpty()
-                        ? QString()
-                        : warnings.join(QStringLiteral("；")) +
-                              QStringLiteral("。可点击“修复注册表”，原文件将先备份。"));
+                QString message = m_notice;
+                if (!warnings.isEmpty()) {
+                    if (!message.isEmpty())
+                        message += QLatin1Char('\n');
+                    message += warnings.join(QStringLiteral("；"));
+                    message += QStringLiteral("。可点击“修复注册表”，原文件将先备份。");
+                }
+                m_message->setText(message);
                 for (const auto &value : data.value("libraries").toArray()) {
                     const auto row = value.toObject();
                     if (!row.value("read_only").toBool())
@@ -343,8 +347,11 @@ KnowledgeManagerDialog::KnowledgeManagerDialog(const QString &directory, const Q
                     return;
                 }
                 const QString backup = result.data.value("backup").toString();
-                if (!backup.isEmpty())
-                    m_space->setText(QStringLiteral("注册表已修复，原文件备份：%1").arg(backup));
+                m_notice = result.data.value("warning").toString();
+                if (!backup.isEmpty()) {
+                    m_notice = QStringLiteral("注册表已修复，原文件备份：%1").arg(backup);
+                    m_space->setText(m_notice);
+                }
                 load();
             });
     };
