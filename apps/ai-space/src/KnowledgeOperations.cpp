@@ -1137,8 +1137,9 @@ void SmartSpaceWidget::handleKnowledgeOutput()
             }
             const QString text =
                 stage == QLatin1String("manifest")
-                    ? QStringLiteral("1/3 全量文件清单（不提取正文）")
-                : stage == QLatin1String("text") ? QStringLiteral("2/3 文本正文提取（不运行 OCR）")
+                    ? QStringLiteral("扫描文件清单（遍历目录，不重新提取已有正文）")
+                : stage == QLatin1String("text")
+                    ? QStringLiteral("校验并更新正文（复用未变化内容，不运行 OCR）")
                 : stage == QLatin1String("retry")
                     ? QStringLiteral("正在重新处理选中文件（沿用资源限制，可暂停）")
                     : QStringLiteral("3/3 受限 OCR 补全（可暂停）");
@@ -1185,14 +1186,18 @@ void SmartSpaceWidget::handleKnowledgeOutput()
         }
         if (task == QLatin1String("build") && !object.value(QStringLiteral("done")).toBool()) {
             m_statusLabel->setText(
-                QStringLiteral("%5 %1/%2 · 文档 %3 · 片段 %4")
+                QStringLiteral("%5 %1/%2 · 已复用 %3 · 重新提取 %4%6")
                     .arg(object.value(QStringLiteral("processed")).toInt())
                     .arg(object.value(QStringLiteral("total")).toInt())
-                    .arg(object.value(QStringLiteral("documents")).toInt())
-                    .arg(object.value(QStringLiteral("chunks")).toInt())
+                    .arg(object.value(QStringLiteral("reused")).toInt())
+                    .arg(object.value(QStringLiteral("updated")).toInt())
                     .arg(property("knowledgeStage").toString() == QLatin1String("retry")
                              ? QStringLiteral("失败项重试")
-                             : QStringLiteral("知识库建库")));
+                             : QStringLiteral("正文校验"))
+                    .arg(object.value("retainedOcr").toInt()
+                             ? QStringLiteral(" · 保留待 OCR 核对 %1")
+                                   .arg(object.value("retainedOcr").toInt())
+                             : QString()));
         }
     }
 }

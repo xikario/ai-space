@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -73,6 +74,198 @@ class FollowupReview(unittest.TestCase):
             "UPDATE document_availability SET absent_since='2000-01-01T00:00:00Z' WHERE document_id=?",
             (ident,),
         )
+
+    def media_fixture(self, suffix=".png", signature="unrecognized"):
+        path = self.root / ("scanned" + suffix)
+        path.write_bytes(b"unchanged source")
+        args = worker.parser().parse_args(["build", "--db", str(self.path)])
+        info = path.stat()
+        if signature == "legacy":
+            signature = hashlib.sha256(
+                json.dumps(
+                    [
+                        worker.parser_version(path),
+                        (info.st_mtime_ns, info.st_size),
+                        1200,
+                        120,
+                        True,
+                        False,
+                    ],
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+        with self.database() as db:
+            self.add(
+                db, 1, status="complete", kind="image" if suffix == ".png" else "pdf", original=path
+            )
+            db.execute(
+                "UPDATE extraction_state SET source_signature=?,parser_version=?,indexed_chars=13",
+                (signature, worker.parser_version(path)),
+            )
+        item = dict(
+            path=str(path),
+            name=path.name,
+            root=str(self.root),
+            category="document",
+            is_dir=False,
+            size=info.st_size,
+            modified_ms=info.st_mtime_ns // 1000000,
+        )
+        return path, args, item
+
+    def media_build(self, args, item, extraction=None):
+        output = io.StringIO()
+        with mock.patch.object(
+            worker, "index_items", return_value=iter([(1, item)])
+        ), mock.patch.object(
+            worker,
+            "Extraction",
+            extraction or mock.Mock(side_effect=AssertionError("unexpected extraction")),
+        ), contextlib.redirect_stdout(
+            output
+        ):
+            worker.build_locked(args)
+        return json.loads(output.getvalue().splitlines()[-1])
+
+    def test_legacy_media_ocr_is_reused_and_signature_upgraded(self):
+        path, args, item = self.media_fixture(signature="legacy")
+        result = self.media_build(args, item)
+        self.assertEqual(
+            (result["reused"], result["updated"], result["legacySignaturesReused"]), (1, 0, 1)
+        )
+        with lib.open_readonly(self.path) as db:
+            self.assertEqual(
+                db.execute("SELECT content FROM chunks").fetchone()[0], "retained body"
+            )
+            self.assertEqual(
+                db.execute("SELECT source_signature FROM extraction_state").fetchone()[0],
+                worker.source_signature(item, args, ocr=True),
+            )
+        self.assertEqual(self.media_build(args, item)["legacySignaturesReused"], 0)
+
+    def test_legacy_media_compatibility_rejects_changed_source_or_policy(self):
+        path, args, item = self.media_fixture(signature="legacy")
+        with lib.open_readonly(self.path) as db:
+            state = db.execute(
+                "SELECT source_signature,status,parser_version,indexed_chars FROM extraction_state"
+            ).fetchone()
+
+        def source():
+            info = path.stat()
+            return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size
+
+        self.assertIsNotNone(worker.compatible_media_signature(item, args, state, source()))
+        for key, value in (
+            ("force", True),
+            ("ocr", True),
+            ("snapshot_only", True),
+            ("chunk_size", 600),
+        ):
+            with mock.patch.object(args, key, value):
+                self.assertIsNone(worker.compatible_media_signature(item, args, state, source()))
+        self.assertIsNone(
+            worker.compatible_media_signature(
+                item, args, (state[0], state[1], "different-parser", state[3]), source()
+            )
+        )
+        path.write_bytes(b"new source with different length")
+        self.assertIsNone(worker.compatible_media_signature(item, args, state, source()))
+
+    def test_text_only_refresh_retains_old_image_and_partial_pdf_ocr(self):
+        for suffix, issue in ((".png", "image_needs_ocr"), (".pdf", "page_needs_ocr:2")):
+            self.path = self.root / ("media" + suffix + ".sqlite")
+            path, args, item = self.media_fixture(suffix)
+
+            class Partial:
+                status = "partial"
+                kind = "image" if suffix == ".png" else "pdf"
+                blocks = 1
+
+                def __init__(self, *unused, **kwargs):
+                    self.issues = [issue]
+
+                def __iter__(self):
+                    return iter([] if suffix == ".png" else [("第 1 页", "a new text layer")])
+
+                def partial(self, reason):
+                    self.issues.append(reason)
+
+            result = self.media_build(args, item, Partial)
+            self.assertEqual((result["retainedOcr"], result["updated"]), (1, 0))
+            with lib.open_readonly(self.path) as db:
+                self.assertEqual(
+                    db.execute("SELECT content FROM chunks").fetchone()[0], "retained body"
+                )
+                state, issues = db.execute(
+                    "SELECT status,issues_json FROM extraction_state"
+                ).fetchone()
+                self.assertEqual(state, "partial")
+                self.assertIn("previous_ocr_body_retained", issues)
+                self.assertEqual(db.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertEqual(self.media_build(args, item)["reused"], 1)
+
+            class Full:
+                status = "complete"
+                kind = "image" if suffix == ".png" else "pdf"
+                blocks = 1
+                issues = []
+
+                def __init__(self, *unused, **kwargs):
+                    pass
+
+                def __iter__(self):
+                    return iter([("新 OCR", "newly recognized original content")])
+
+            args.ocr = True
+            args.ocr_only = True
+            result = self.media_build(args, item, Full)
+            self.assertEqual((result["retainedOcr"], result["updated"]), (0, 1))
+            with lib.open_readonly(self.path) as db:
+                self.assertIn(
+                    "newly recognized", db.execute("SELECT content FROM chunks").fetchone()[0]
+                )
+                self.assertEqual(
+                    db.execute("SELECT status FROM extraction_state").fetchone()[0], "complete"
+                )
+
+    def test_supervisor_pause_while_waiting_for_quiet_child(self):
+        wrapper = """import sys,json
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import knowledge_jobs as jobs
+original = jobs.subprocess.Popen
+def child(command, **kwargs):
+    if any(str(part).endswith('/smart_space_indexer.py') for part in command):
+        return original([sys.executable, "-c", "import json,time;print(json.dumps(dict(phase='quiet-child')),flush=True);time.sleep(60)"], **kwargs)
+    return original(command, **kwargs)
+jobs.subprocess.Popen = child
+sys.argv = ['knowledge_jobs', '--directory', sys.argv[2], '--roots-json', json.dumps([str(Path(sys.argv[2]).parent)])]
+raise SystemExit(jobs.main())
+"""
+        process = subprocess.Popen(
+            [sys.executable, "-c", wrapper, str(SCRIPTS), str(self.root / "job")],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            while True:
+                line = process.stdout.readline()
+                self.assertTrue(line, "supervisor exited before entering select")
+                if json.loads(line).get("phase") == "quiet-child":
+                    break
+            process.send_signal(signal.SIGTERM)
+            output, errors = process.communicate(timeout=6)
+            final = json.loads(output.splitlines()[-1])
+            self.assertTrue(final["paused"], errors)
+            self.assertIn("已提交进度保留", final["error"])
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            process.stdout.close()
+            process.stderr.close()
 
     def test_physical_floor_independent_of_virtual_budget(self):
         with mock.patch.object(

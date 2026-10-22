@@ -560,6 +560,40 @@ def source_signature(item, args, ocr=None, source=None):
     ).hexdigest()
 
 
+def compatible_media_signature(item, args, state, source):
+    """Upgrade a recognized old media signature, without rerunning or discarding OCR.
+
+    The old signature bound mtime/size, parser and chunk settings. Only media
+    whose parser policy is unchanged qualifies; text/Office safety and table
+    changes still require extraction. This establishes the stronger source
+    identity for subsequent updates, not a retroactive content-hash guarantee.
+    """
+    if (
+        args.force
+        or args.ocr
+        or args.snapshot_only
+        or not state
+        or len(source) != 5
+        or Path(item["path"]).suffix.lower() not in (IMAGE_SUFFIXES | {".pdf"})
+        or state[2] != parser_version(item["path"])
+    ):
+        return None
+    from text_safety import document_char_limit
+
+    if state[3] > document_char_limit():
+        return None
+    for ocr in (False, True):
+        if ocr and os.environ.get("AI_SPACE_OCR_LANGUAGES", "chi_sim+eng") != "chi_sim+eng":
+            continue
+        payload = [state[2], (source[2], source[4]), args.chunk_size, args.overlap, ocr, False]
+        legacy = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        if legacy == state[0]:
+            upgraded = source_signature(item, args, ocr=ocr, source=source)
+            if upgraded == source_signature(item, args, ocr=ocr):
+                return upgraded
+    return None
+
+
 def extraction_counts(db):
     exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='extraction_state'").fetchone()
     if not exists:
@@ -704,6 +738,7 @@ def build_locked(args):
     skipped = ignored_ids(db)
     db.execute("DELETE FROM seen_paths")
     processed = documents = chunks_count = updated = reused = 0
+    legacy_reused = retained_ocr = 0
     previous_failures_skipped = 0
     total = 0
     generated_at = ""
@@ -734,6 +769,9 @@ def build_locked(args):
             path=path,
             documents=documents,
             chunks=chunks_count,
+            updated=updated,
+            reused=reused,
+            retainedOcr=retained_ocr,
             **{unit: count},
         )
 
@@ -800,18 +838,27 @@ def build_locked(args):
                 db.execute("DELETE FROM ignored_documents WHERE document_id=?", (old[0],))
             state = (
                 db.execute(
-                    "SELECT source_signature,status FROM extraction_state WHERE document_id=?",
+                    "SELECT source_signature,status,parser_version,indexed_chars FROM extraction_state WHERE document_id=?",
                     (old[0],),
                 ).fetchone()
                 if old
                 else None
             )
+            compatible = compatible_media_signature(item, args, state, source)
+            if compatible:
+                state = (compatible, *state[1:])
             if (
                 getattr(args, "ocr_only", False)
                 and state
                 and state[1] == "complete"
                 and state[0] == text_signature
             ):
+                if compatible:
+                    db.execute(
+                        "UPDATE extraction_state SET source_signature=? WHERE document_id=?",
+                        (compatible, old[0]),
+                    )
+                    legacy_reused += 1
                 reused += 1
                 continue
             preserves_ocr = (
@@ -833,6 +880,12 @@ def build_locked(args):
                 and (state[0] == signature or preserves_ocr or preserves_text)
                 and (state[1] not in {"failed", "missing"} or state[0] == signature)
             ):
+                if compatible:
+                    db.execute(
+                        "UPDATE extraction_state SET source_signature=? WHERE document_id=?",
+                        (compatible, old[0]),
+                    )
+                    legacy_reused += 1
                 reused += 1
                 previous_failures_skipped += int(state[1] in {"failed", "missing"})
                 documents += 1
@@ -884,7 +937,7 @@ def build_locked(args):
                     db.execute(
                         "SELECT count(*) FROM chunks WHERE document_id=?", (doc_id,)
                     ).fetchone()[0]
-                    if retry_ids
+                    if retry_ids or (old and "." + suffix in (IMAGE_SUFFIXES | {".pdf"}))
                     else 0
                 )
                 digest = hashlib.sha256()
@@ -946,14 +999,35 @@ def build_locked(args):
                         raise RuntimeError(
                             "Retry produced no new text; previous indexed body retained"
                         )
-                    if not count and result.status == "complete":
-                        result.status = "no_text"
-                    db.execute(
-                        "UPDATE documents SET content_hash=? WHERE id=?",
-                        (digest.hexdigest(), doc_id),
+                    keep_ocr = (
+                        not args.ocr
+                        and previous_chunks
+                        and "." + suffix in (IMAGE_SUFFIXES | {".pdf"})
+                        and any(
+                            issue == "image_needs_ocr" or issue.startswith("page_needs_ocr:")
+                            for issue in result.issues
+                        )
                     )
-                    db.execute("RELEASE extract_document")
-                    updated += 1
+                    if keep_ocr:
+                        # A text-only refresh cannot replace richer existing OCR
+                        # with an empty image or a PDF's text layer alone.
+                        db.execute("ROLLBACK TO extract_document")
+                        db.execute("RELEASE extract_document")
+                        result.partial("previous_ocr_body_retained:refresh_with_ocr")
+                        count, indexed_chars = db.execute(
+                            "SELECT count(*),coalesce(sum(length(content)),0) FROM chunks WHERE document_id=?",
+                            (doc_id,),
+                        ).fetchone()
+                        retained_ocr += 1
+                    else:
+                        if not count and result.status == "complete":
+                            result.status = "no_text"
+                        db.execute(
+                            "UPDATE documents SET content_hash=? WHERE id=?",
+                            (digest.hexdigest(), doc_id),
+                        )
+                        db.execute("RELEASE extract_document")
+                        updated += 1
                 except Exception as error:
                     try:
                         db.execute("ROLLBACK TO extract_document")
@@ -1022,6 +1096,8 @@ def build_locked(args):
                     chunks=chunks_count,
                     updated=updated,
                     reused=reused,
+                    legacySignaturesReused=legacy_reused,
+                    retainedOcr=retained_ocr,
                 )
         stale_ids = (
             []
@@ -1141,6 +1217,8 @@ def build_locked(args):
             chunks=final_chunks,
             updated=updated,
             reused=reused,
+            legacySignaturesReused=legacy_reused,
+            retainedOcr=retained_ocr,
             previousFailuresSkipped=previous_failures_skipped,
             deleted=len(removed_ids),
             retainedAbsent=len(stale_ids) - len(removed_ids),

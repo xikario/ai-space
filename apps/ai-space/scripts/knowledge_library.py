@@ -331,6 +331,7 @@ def describe_issue(value):
     text = str(value).strip()
     exact = {
         "previous_chunks_retained": "此前已入库的正文（如有）已保留",
+        "previous_ocr_body_retained:refresh_with_ocr": "本次未运行 OCR，已保留此前正文；请运行 OCR 补全以核对并更新图片或扫描页内容",
         "workbook is encrypted": "工作簿已加密，无法读取；请解除加密后重新处理",
         "encrypted word document": "Word 文档已加密，无法读取；请解除加密后重新处理",
         "file is not a zip file": "文件内容不是有效的压缩文档，可能已损坏或扩展名不符；请用办公软件检查并另存后重试",

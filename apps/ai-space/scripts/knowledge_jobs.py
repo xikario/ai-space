@@ -179,8 +179,13 @@ def main():
         )
         scripts = Path(__file__).resolve().parent
 
+        pause_requested = False
+
         def paused(signum, frame):
-            raise InterruptedError("任务已暂停；已提交进度保留，当前未提交批次可能需要重新处理")
+            nonlocal pause_requested
+            # selectors may swallow InterruptedError raised inside a signal
+            # handler. Check cancellation outside select(), at the next tick.
+            pause_requested = True
 
         signal.signal(signal.SIGTERM, paused)
         try:
@@ -217,6 +222,8 @@ def main():
             )
 
             def check_resources():
+                if pause_requested:
+                    raise InterruptedError("任务已暂停；已提交进度保留，当前未提交批次可能需要重新处理")
                 check_memory_pressure("建库运行", starting=False)
                 try:
                     guard_storage(database, args.reserve_gib, args.max_gib)
