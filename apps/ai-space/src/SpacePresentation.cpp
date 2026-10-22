@@ -57,3 +57,28 @@ QString formattedModified(const QDateTime &modified)
 
 
 }
+
+#include <QComboBox>
+#include <QListView>
+namespace AiSpaceUi {
+QString cssColor(const QColor &color)
+{
+    return QStringLiteral("rgba(%1,%2,%3,%4)")
+        .arg(color.red()).arg(color.green()).arg(color.blue()).arg(color.alpha());
+}
+
+void styleModernCombos(QWidget *root)
+{
+    if (!root)
+        return;
+    const QList<QComboBox *> combos = root->findChildren<QComboBox *>();
+    for (QComboBox *combo : combos) {
+        if (!qobject_cast<QListView *>(combo->view())) {
+            auto *view = new QListView(combo);
+            view->setFrameShape(QFrame::NoFrame);
+            combo->setView(view);
+        }
+    }
+}
+
+}

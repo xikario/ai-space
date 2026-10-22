@@ -29,10 +29,15 @@ file(RELATIVE_PATH AI_SPACE_SKILL_RELATIVE "${CMAKE_INSTALL_FULL_BINDIR}" "${CMA
 configure_file(${APP}/src/AppConfig.h.in ${CMAKE_BINARY_DIR}/generated/AppConfig.h @ONLY)
 add_custom_target(ai-space-runtime ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${APP}/scripts ${CMAKE_BINARY_DIR}/libexec/ai-space
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${APP}/skills ${CMAKE_BINARY_DIR}/share/ai-space/skills)
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${APP}/skills ${CMAKE_BINARY_DIR}/share/ai-space/skills
+    COMMAND ${CMAKE_COMMAND} -E copy ${APP}/scripts/knowledge_library.py
+        ${CMAKE_BINARY_DIR}/share/ai-space/skills/ai-space-index-query/scripts/knowledge_library.py)
 add_library(ai-space-core STATIC
     ${APP}/src/Migration.cpp ${APP}/src/SmartSpaceWidget.cpp
     ${APP}/src/IndexSnapshotLoader.cpp ${APP}/src/PreviewPane.cpp
+    ${APP}/src/SettingsPage.cpp ${APP}/src/KnowledgeOperations.cpp
+    ${APP}/src/UiMessages.cpp ${APP}/src/UiMessages.h
+    ${APP}/src/SpaceFormats.cpp ${APP}/src/SpaceFormats.h
     ${APP}/src/SpacePresentation.cpp ${APP}/src/SpacePresentation.h
     ${APP}/src/WindowCornerFallback.cpp ${APP}/src/WindowCornerFallback.h
     ${APP}/src/KnowledgeManagerDialog.cpp ${APP}/src/KnowledgeManagerDialog.h
@@ -74,6 +79,8 @@ if(BUILD_TESTING)
     target_compile_definitions(ai-space-test-driver PRIVATE AI_SPACE_TEST_CONTROL)
     target_link_libraries(ai-space-test-driver PRIVATE ai-space-core)
     add_dependencies(ai-space-test-driver ai-space-runtime)
+    add_test(NAME ai-space-portable-skill COMMAND ${Python3_EXECUTABLE} ${APP}/tests/portable_skill_test.py ${CMAKE_BINARY_DIR}/share/ai-space/skills/ai-space-index-query)
+    set_tests_properties(ai-space-portable-skill PROPERTIES TIMEOUT 25)
     add_test(NAME ai-space-review-regressions COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_review_regressions.py -v)
     set_tests_properties(ai-space-review-regressions PROPERTIES TIMEOUT 120)
     add_test(NAME ai-space-data-boundaries COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_data_boundaries.py -v)
