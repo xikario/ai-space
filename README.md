@@ -27,7 +27,7 @@ cmake --install build --prefix "$HOME/.local"
 
 PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中文语言包；缺失时会报告部分提取或失败，不冒充完整正文。旧 XLS/OLE 的 Python 依赖及许可证随源码提供。
 
-旧版 PowerPoint 97–2003（`.ppt`）及采用相同结构的 WPS 演示（`.dps`）可直接提取页面文字并保留页码，无需启动办公软件或先转为 PPTX。已有失败项可用「重新处理选中」补入；图片文字、备注及嵌入对象不在本次提取范围，会明确标为部分提取，详见[旧版演示兼容与验证](docs/LEGACY_PPT_20261022.md)。
+旧版 PowerPoint 97–2003（`.ppt`）及采用相同结构的 WPS 演示（`.dps`）可直接提取页面文字并保留页码，无需启动办公软件或先转为 PPTX。已有失败项可用「重新处理选中」补入；图片文字、备注及嵌入对象不在本次提取范围，会明确标为部分提取，详见[旧版演示兼容与验证](docs/EXTRACTION.md)。
 
 ## 使用
 
@@ -37,16 +37,13 @@ PDF 提取需 Poppler（`pdftotext` / `pdftoppm`）；OCR 需 Tesseract 及中�
 
 命令行：`--show`、`--hide`、`--toggle`、`--settings`、`--status`、`--quit`、`--autostart`。旧 `--hide` 参数兼容为最小化到任务栏。同一会话只运行一个实例。窗口有自己的图标和任务栏身份；支持最小化、最大化/还原及标题栏拖动。Ctrl+K 随时返回搜索；宽窗口预览与结果并排，窄窗口以预览页显示。
 
-- [知识库 v1：存储、AIKB、SKILL 与建库向导](docs/KNOWLEDGE_LIBRARIES_V1_20261021.md)
-- [最终代码评审与验证记录](docs/FINAL_REVIEW_20261021.md)
-- [失败项重试、忽略与恢复](docs/FAILURE_ACTIONS_20261022.md)
-- [V2 界面精修](docs/UI_V2_POLISH_20261020.md)
+- [知识库 v1：存储、AIKB、SKILL 与建库向导](docs/KNOWLEDGE_LIBRARIES.md)
+- [构建、测试与验证边界](docs/TESTING.md)
+- [失败项重试、忽略与恢复](docs/FAILURES.md)
 - [索引、检索与界面](docs/SMART_SPACE.md)
 - [知识库与命令行](docs/SMART_SPACE_KNOWLEDGE.md)
 - [结构化正文提取](docs/SMART_SPACE_STRUCTURED_KNOWLEDGE.md)
 - [迁移与进程接口](docs/MIGRATION.md)
-- [拆分验证](docs/VALIDATION.md)
-- [方案 A 适配、界面与验证](docs/WINDOW_MODE_A_20261020.md)
 
 ## 数据与旧版迁移
 
