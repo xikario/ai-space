@@ -40,3 +40,42 @@ jobs:
       - run: runuser -u ci -- ctest --output-on-failure -j2
         working-directory: build
       - run: runuser -u ci -- cmake --install build --prefix "$PWD/build/staging"
+  static-and-sanitizers:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install developer tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qtbase5-dev zlib1g-dev python3-venv clang-format-14
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements-dev.txt
+      - name: Check owned Python sources
+        run: .venv/bin/python tools/check_python.py
+      - name: Check C++ style and emit a reviewable patch
+        run: |
+          python3 tools/check_cpp.py --write
+          python3 - <<'PY'
+          import base64
+          import gzip
+          import subprocess
+          import sys
+          diff = subprocess.check_output(['git', 'diff', '--', '*.cpp', '*.h'])
+          if diff:
+              print('AI_SPACE_FORMAT_PATCH_BEGIN')
+              encoded = base64.b64encode(gzip.compress(diff, mtime=0)).decode()
+              for offset in range(0, len(encoded), 4096):
+                  print(encoded[offset:offset+4096])
+              print('AI_SPACE_FORMAT_PATCH_END')
+              sys.exit('C++ formatting required; patch above contains only tracked source files')
+          PY
+      - name: Build selected sanitizer targets
+        run: |
+          cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DAI_SPACE_SANITIZERS=ON
+          cmake --build build-sanitize --target ai-space-worker-protocol-test background-task-test -j2
+      - name: Check instrumented process and asynchronous paths
+        working-directory: build-sanitize
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest -R 'worker-protocol|background-task' --output-on-failure

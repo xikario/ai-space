@@ -14,3 +14,14 @@ git diff --cached --check
 发布检查只能发现部分常见泄漏，不能代替人工核对。不要把真实客户正文、访问令牌或包含完整个人路径的截图加入 issue、日志或测试夹具。
 
 Python 新代码请使用 UTF-8、清晰的控制流和独立语句；C++ 新代码遵循周边 Qt 风格。单一版本来源为根目录 CMake 的 `project(... VERSION ...)`。新增文档入口应链接到 README，使用稳定名称说明安装、使用或故障排查，避免发布私人过程记录。
+
+开发检查（与应用运行环境分开）：
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python tools/check_python.py
+python3 tools/check_cpp.py
+```
+
+Python 风格工具固定版本，检查脚本同时核对 Python 3.8 语法和自有生产代码的静态诊断；第三方 `_vendor` 保持原样。C++ 的标准版本为 clang-format-14，需另行安装。需要整理时给检查脚本加 `--write`，并将纯格式改动与行为改动分开提交。CI 另外执行选定进程和异步路径的 ASan/UBSan 检查；这不能替代完整业务回归。

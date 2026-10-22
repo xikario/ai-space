@@ -11,3 +11,6 @@ releases/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+.venv/
+build-sanitize/
