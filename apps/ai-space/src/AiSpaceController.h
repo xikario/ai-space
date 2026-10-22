@@ -16,14 +16,15 @@ class QWidget;
 #define AI_SPACE_TEST_SLOT
 #endif
 
-class AiSpaceController final : public QObject {
+class AiSpaceController final : public QObject
+{
     Q_OBJECT
-    Q_CLASSINFO("D-Bus Interface","io.github.xikario.AiSpace")
-public:
-    explicit AiSpaceController(QObject *parent=nullptr);
+    Q_CLASSINFO("D-Bus Interface", "io.github.xikario.AiSpace")
+  public:
+    explicit AiSpaceController(QObject *parent = nullptr);
     ~AiSpaceController() override;
     void initialize(bool show, bool settings);
-public slots:
+  public slots:
     Q_SCRIPTABLE void showWindow();
     Q_SCRIPTABLE void hideWindow();
     Q_SCRIPTABLE void toggleWindow();
@@ -35,8 +36,8 @@ public slots:
     AI_SPACE_TEST_SLOT void search(const QString &query);
     AI_SPACE_TEST_SLOT void setAlwaysOnTop(bool value);
     AI_SPACE_TEST_SLOT void setAutoStart(bool value);
-    AI_SPACE_TEST_SLOT void moveWindow(int x,int y);
-    AI_SPACE_TEST_SLOT void resizeWindow(int width,int height);
+    AI_SPACE_TEST_SLOT void moveWindow(int x, int y);
+    AI_SPACE_TEST_SLOT void resizeWindow(int width, int height);
     AI_SPACE_TEST_SLOT void minimizeWindow();
     AI_SPACE_TEST_SLOT void maximizeWindow();
     AI_SPACE_TEST_SLOT void restoreWindow();
@@ -46,21 +47,22 @@ public slots:
     AI_SPACE_TEST_SLOT void pauseKnowledgeTask();
     AI_SPACE_TEST_SLOT void hideFolder(const QString &path);
     AI_SPACE_TEST_SLOT void excludeFolder(const QString &path);
-signals:
+  signals:
     void stateChanged(const QString &json);
-private:
+
+  private:
     void requestClose();
-    bool m_quitting=false;
+    bool m_quitting = false;
     void notify();
     void applyWindowMode();
-    void perform(std::function<void(SmartSpaceWidget*)> action);
+    void perform(std::function<void(SmartSpaceWidget *)> action);
     QPointer<SmartSpaceWidget> m_widget;
-    QList<std::function<void(SmartSpaceWidget*)>> m_pending;
-    QSystemTrayIcon *m_tray=nullptr;
+    QList<std::function<void(SmartSpaceWidget *)>> m_pending;
+    QSystemTrayIcon *m_tray = nullptr;
     QPointer<QWidget> m_bootstrap;
-    bool m_requestedVisible=true;
-    bool m_migrationPending=false;
+    bool m_requestedVisible = true;
+    bool m_migrationPending = false;
     QElapsedTimer m_startup;
-    qint64 m_uiReadyMs=-1,m_indexReadyMs=-1;
+    qint64 m_uiReadyMs = -1, m_indexReadyMs = -1;
 };
 #undef AI_SPACE_TEST_SLOT

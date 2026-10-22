@@ -1,6 +1,7 @@
 #include "SpacePresentation.h"
 #include <QDir>
-namespace AiSpaceUi {
+namespace AiSpaceUi
+{
 QString normalizedPath(QString path)
 {
     path = QDir::cleanPath(path);
@@ -18,11 +19,16 @@ bool pathIsInside(const QString &path, const QString &folder)
 
 QString categoryTitle(const QString &category)
 {
-    if (category == QLatin1String("image")) return QStringLiteral("图片");
-    if (category == QLatin1String("pdf")) return QStringLiteral("PDF");
-    if (category == QLatin1String("presentation")) return QStringLiteral("演示");
-    if (category == QLatin1String("spreadsheet")) return QStringLiteral("表格");
-    if (category == QLatin1String("document")) return QStringLiteral("文档");
+    if (category == QLatin1String("image"))
+        return QStringLiteral("图片");
+    if (category == QLatin1String("pdf"))
+        return QStringLiteral("PDF");
+    if (category == QLatin1String("presentation"))
+        return QStringLiteral("演示");
+    if (category == QLatin1String("spreadsheet"))
+        return QStringLiteral("表格");
+    if (category == QLatin1String("document"))
+        return QStringLiteral("文档");
     return QStringLiteral("其他");
 }
 
@@ -55,16 +61,19 @@ QString formattedModified(const QDateTime &modified)
     return local.toString(QStringLiteral("MM-dd HH:mm"));
 }
 
-
-}
+} // namespace AiSpaceUi
 
 #include <QComboBox>
 #include <QListView>
-namespace AiSpaceUi {
+namespace AiSpaceUi
+{
 QString cssColor(const QColor &color)
 {
     return QStringLiteral("rgba(%1,%2,%3,%4)")
-        .arg(color.red()).arg(color.green()).arg(color.blue()).arg(color.alpha());
+        .arg(color.red())
+        .arg(color.green())
+        .arg(color.blue())
+        .arg(color.alpha());
 }
 
 void styleModernCombos(QWidget *root)
@@ -81,4 +90,4 @@ void styleModernCombos(QWidget *root)
     }
 }
 
-}
+} // namespace AiSpaceUi

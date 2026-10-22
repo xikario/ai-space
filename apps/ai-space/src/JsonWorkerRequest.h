@@ -7,9 +7,10 @@
 #include <functional>
 
 // Small read/configuration requests only. Build jobs retain their process-group owner.
-class JsonWorkerRequest final : public QObject {
+class JsonWorkerRequest final : public QObject
+{
     Q_OBJECT
-public:
+  public:
     struct Result {
         QJsonObject data;
         QString error;
@@ -24,9 +25,10 @@ public:
                                   int idleTimeoutMs = 30000, int maxBytes = 4 * 1024 * 1024);
     ~JsonWorkerRequest() override;
     void cancel();
-signals:
+  signals:
     void progress(const QJsonObject &value);
-private:
+
+  private:
     explicit JsonWorkerRequest(QObject *parent);
     void readOutput();
     void consume(const QByteArray &line);

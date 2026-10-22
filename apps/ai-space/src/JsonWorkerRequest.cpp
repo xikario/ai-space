@@ -5,7 +5,8 @@
 #include <QPointer>
 #include <QStandardPaths>
 
-JsonWorkerRequest::JsonWorkerRequest(QObject *parent) : QObject(parent), m_process(new QProcess(this))
+JsonWorkerRequest::JsonWorkerRequest(QObject *parent)
+    : QObject(parent), m_process(new QProcess(this))
 {
     m_idle.setSingleShot(true);
     m_total.setSingleShot(true);
@@ -14,8 +15,8 @@ JsonWorkerRequest::JsonWorkerRequest(QObject *parent) : QObject(parent), m_proce
         const auto bytes = m_process->readAllStandardError();
         m_diagnostics.append(bytes.left(qMax(0, 8192 - m_diagnostics.size())));
     });
-    connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int, QProcess::ExitStatus) { complete(); });
+    connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this](int, QProcess::ExitStatus) { complete(); });
     connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
             m_result.error = QStringLiteral("无法启动知识库工具，请检查 Python 和应用安装：%1")
@@ -32,8 +33,8 @@ JsonWorkerRequest::JsonWorkerRequest(QObject *parent) : QObject(parent), m_proce
 }
 
 JsonWorkerRequest *JsonWorkerRequest::run(QObject *owner, const QString &script,
-                                         const QStringList &arguments, Callback callback,
-                                         int idleTimeoutMs, int maxBytes)
+                                          const QStringList &arguments, Callback callback,
+                                          int idleTimeoutMs, int maxBytes)
 {
     auto *request = new JsonWorkerRequest(owner);
     request->m_callback = std::move(callback);
@@ -41,7 +42,10 @@ JsonWorkerRequest *JsonWorkerRequest::run(QObject *owner, const QString &script,
     request->m_idle.setInterval(idleTimeoutMs);
     request->m_total.setInterval(qMax(300000, idleTimeoutMs));
     QTimer::singleShot(0, request, [request, script, arguments] {
-        if (request->m_result.canceled) { request->complete(); return; }
+        if (request->m_result.canceled) {
+            request->complete();
+            return;
+        }
         const QString python = QStandardPaths::findExecutable(QStringLiteral("python3"));
         if (python.isEmpty()) {
             request->m_result.error = QStringLiteral("找不到 Python 3，请安装后重试");
@@ -106,8 +110,8 @@ void JsonWorkerRequest::complete()
         else if (m_result.timedOut)
             m_result.error = QStringLiteral("后台读取超时，请确认存储设备已连接后重试");
         else if (!m_result.data.value(QStringLiteral("error")).toString().isEmpty())
-            m_result.error = m_result.data.value(QStringLiteral("errorDescription")).toString(
-                m_result.data.value(QStringLiteral("error")).toString());
+            m_result.error = m_result.data.value(QStringLiteral("errorDescription"))
+                                 .toString(m_result.data.value(QStringLiteral("error")).toString());
         else if (m_process->exitStatus() != QProcess::NormalExit || m_process->exitCode() != 0)
             m_result.error = QStringLiteral("后台工具异常退出：%1")
                                  .arg(QString::fromUtf8(m_diagnostics).trimmed().left(500));
@@ -126,8 +130,10 @@ void JsonWorkerRequest::complete()
 void JsonWorkerRequest::cancel()
 {
     m_result.canceled = true;
-    if (m_process->state() == QProcess::NotRunning) complete();
-    else m_process->kill();
+    if (m_process->state() == QProcess::NotRunning)
+        complete();
+    else
+        m_process->kill();
 }
 
 JsonWorkerRequest::~JsonWorkerRequest()
@@ -135,8 +141,8 @@ JsonWorkerRequest::~JsonWorkerRequest()
     if (m_process->state() != QProcess::NotRunning) {
         m_process->disconnect(this);
         m_process->setParent(QCoreApplication::instance());
-        connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                m_process, &QObject::deleteLater);
+        connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), m_process,
+                &QObject::deleteLater);
         m_process->kill();
     }
 }

@@ -22,7 +22,8 @@ inline QIcon resolveFileIcon(const QString &filePath, bool isDir)
 {
     if (isDir) {
         QIcon icon = QIcon::fromTheme(QLatin1String("folder"));
-        if (!icon.isNull()) return icon;
+        if (!icon.isNull())
+            return icon;
         return QIcon::fromTheme(QLatin1String("inode-directory"));
     }
 
@@ -30,28 +31,30 @@ inline QIcon resolveFileIcon(const QString &filePath, bool isDir)
     const QMimeType mime = db.mimeTypeForFile(filePath);
 
     QIcon icon = QIcon::fromTheme(mime.iconName());
-    if (!icon.isNull()) return icon;
+    if (!icon.isNull())
+        return icon;
 
     icon = QIcon::fromTheme(mime.genericIconName());
-    if (!icon.isNull()) return icon;
+    if (!icon.isNull())
+        return icon;
 
     QFileIconProvider prov;
     icon = prov.icon(QFileInfo(filePath));
-    if (!icon.isNull()) return icon;
+    if (!icon.isNull())
+        return icon;
 
     return QIcon::fromTheme(QLatin1String("text-x-generic"));
 }
 
-struct DesktopItem
-{
+struct DesktopItem {
     using OpenCallback = std::function<void(bool, const QString &)>;
     QString filePath;
     QString displayName;
-    QIcon   icon;
+    QIcon icon;
     QString mimeType;
-    bool    isDesktopEntry = false;
-    bool    isDir          = false;
-    bool    isSystemIcon   = false;
+    bool isDesktopEntry = false;
+    bool isDir = false;
+    bool isSystemIcon = false;
 
     bool isValid() const { return !filePath.isEmpty(); }
 
@@ -59,15 +62,15 @@ struct DesktopItem
     static DesktopItem fromPath(const QString &path)
     {
         QFileInfo fi(path);
-        if (!fi.exists()) return {};
+        if (!fi.exists())
+            return {};
 
-        if (!fi.isDir() &&
-            path.endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive))
+        if (!fi.isDir() && path.endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive))
             return fromDesktopFile(path);
 
         DesktopItem item;
-        item.filePath    = fi.absoluteFilePath();
-        item.isDir       = fi.isDir();
+        item.filePath = fi.absoluteFilePath();
+        item.isDir = fi.isDir();
         item.displayName = fi.fileName();
 
         QMimeDatabase db;
@@ -80,13 +83,11 @@ struct DesktopItem
 
     static DesktopItem computerItem()
     {
-        const QStringList desktopIds = {
-            "peony-computer.desktop",
-            "org.ukui.peony.computer.desktop"
-        };
+        const QStringList desktopIds = {"peony-computer.desktop",
+                                        "org.ukui.peony.computer.desktop"};
         for (const QString &desktopId : desktopIds) {
-            const QString path = QStandardPaths::locate(
-                QStandardPaths::ApplicationsLocation, desktopId);
+            const QString path =
+                QStandardPaths::locate(QStandardPaths::ApplicationsLocation, desktopId);
             if (!path.isEmpty()) {
                 DesktopItem item = fromDesktopFile(path);
                 item.filePath = QLatin1String("computer:///");
@@ -108,13 +109,10 @@ struct DesktopItem
 
     static DesktopItem trashItem()
     {
-        const QStringList desktopIds = {
-            "peony-trash.desktop",
-            "org.ukui.peony.trash.desktop"
-        };
+        const QStringList desktopIds = {"peony-trash.desktop", "org.ukui.peony.trash.desktop"};
         for (const QString &desktopId : desktopIds) {
-            const QString path = QStandardPaths::locate(
-                QStandardPaths::ApplicationsLocation, desktopId);
+            const QString path =
+                QStandardPaths::locate(QStandardPaths::ApplicationsLocation, desktopId);
             if (!path.isEmpty()) {
                 DesktopItem item = fromDesktopFile(path);
                 item.filePath = QLatin1String("trash:///");
@@ -147,26 +145,23 @@ struct DesktopItem
     static DesktopItem fromDesktopFile(const QString &path)
     {
         DesktopItem item;
-        item.filePath       = path;
+        item.filePath = path;
         item.isDesktopEntry = true;
-        item.mimeType       = QLatin1String("application/x-desktop");
+        item.mimeType = QLatin1String("application/x-desktop");
 
         QSettings s(path, QSettings::IniFormat);
         s.setIniCodec("UTF-8");
         s.beginGroup(QLatin1String("Desktop Entry"));
 
         // 名称：优先本地化
-        const QString locale = QLocale::system().name();          // zh_CN
-        const QString lang   = locale.left(locale.indexOf('_'));  // zh
+        const QString locale = QLocale::system().name();       // zh_CN
+        const QString lang = locale.left(locale.indexOf('_')); // zh
 
-        item.displayName = s.value(
-            QString("Name[%1]").arg(locale)).toString();
+        item.displayName = s.value(QString("Name[%1]").arg(locale)).toString();
         if (item.displayName.isEmpty())
-            item.displayName = s.value(
-                QString("Name[%1]").arg(lang)).toString();
+            item.displayName = s.value(QString("Name[%1]").arg(lang)).toString();
         if (item.displayName.isEmpty())
-            item.displayName = s.value(
-                QLatin1String("Name")).toString();
+            item.displayName = s.value(QLatin1String("Name")).toString();
         if (item.displayName.isEmpty())
             item.displayName = QFileInfo(path).completeBaseName();
 
@@ -179,8 +174,7 @@ struct DesktopItem
                 item.icon = QIcon::fromTheme(iconStr);
         }
         if (item.icon.isNull())
-            item.icon = QIcon::fromTheme(
-                QLatin1String("application-x-executable"));
+            item.icon = QIcon::fromTheme(QLatin1String("application-x-executable"));
 
         return item;
     }
@@ -193,30 +187,30 @@ struct DesktopItem
                 callback(false, QStringLiteral("打开请求已失效。"));
             return;
         }
-        if (isSystemIcon ||
-            filePath.startsWith(QLatin1String("computer://")) ||
+        if (isSystemIcon || filePath.startsWith(QLatin1String("computer://")) ||
             filePath.startsWith(QLatin1String("trash://"))) {
-            const QString peony = QStandardPaths::findExecutable(
-                QLatin1String("peony"));
-            bool launched = !peony.isEmpty() &&
-                QProcess::startDetached(peony, QStringList() << filePath);
+            const QString peony = QStandardPaths::findExecutable(QLatin1String("peony"));
+            bool launched =
+                !peony.isEmpty() && QProcess::startDetached(peony, QStringList() << filePath);
             if (!launched)
-                launched = QProcess::startDetached(QLatin1String("gio"),
-                    QStringList() << QLatin1String("open") << filePath);
+                launched = QProcess::startDetached(
+                    QLatin1String("gio"), QStringList() << QLatin1String("open") << filePath);
             if (!launched)
-                launched = QProcess::startDetached(QLatin1String("xdg-open"),
-                    QStringList() << filePath);
+                launched =
+                    QProcess::startDetached(QLatin1String("xdg-open"), QStringList() << filePath);
             if (callback)
-                callback(launched, launched ? QString() :
-                    QStringLiteral("无法启动文件管理器打开这个位置。"));
+                callback(launched,
+                         launched ? QString() : QStringLiteral("无法启动文件管理器打开这个位置。"));
             return;
         }
         if (isDesktopEntry) {
             QString error;
             const bool launched = launchDesktopFileCompat(filePath, &error);
             if (callback)
-                callback(launched, launched ? QString() :
-                    (error.isEmpty() ? QStringLiteral("无法启动这个桌面快捷方式。") : error));
+                callback(launched,
+                         launched ? QString()
+                                  : (error.isEmpty() ? QStringLiteral("无法启动这个桌面快捷方式。")
+                                                     : error));
             return;
         }
 
@@ -235,10 +229,11 @@ struct DesktopItem
         // disappears when this short-lived QProcess is deleted; a regular
         // temporary file remains safe for inherited writers after unlinking.
         state->process->setStandardOutputFile(QProcess::nullDevice());
-        state->process->setStandardErrorFile(state->diagnostics.open()
-            ? state->diagnostics.fileName() : QProcess::nullDevice());
+        state->process->setStandardErrorFile(
+            state->diagnostics.open() ? state->diagnostics.fileName() : QProcess::nullDevice());
         const auto readError = [state] {
-            if (!state->diagnostics.isOpen() || !state->diagnostics.seek(0)) return QString();
+            if (!state->diagnostics.isOpen() || !state->diagnostics.seek(0))
+                return QString();
             return QString::fromLocal8Bit(state->diagnostics.read(4096)).trimmed();
         };
         const auto startOpener = [state](const QStringList &command) {
@@ -246,8 +241,8 @@ struct DesktopItem
             // destroying the desktop only terminates this shell, never that
             // editor. Paths are positional arguments, never shell source.
             QStringList arguments{QStringLiteral("-c"),
-                QStringLiteral("\"$@\"; result=$?; exit \"$result\""),
-                QStringLiteral("ukui-file-opener")};
+                                  QStringLiteral("\"$@\"; result=$?; exit \"$result\""),
+                                  QStringLiteral("ukui-file-opener")};
             arguments.append(command);
             state->process->start(QStringLiteral("/bin/sh"), arguments);
         };
@@ -266,39 +261,41 @@ struct DesktopItem
             state->fallback = true;
             startOpener({QStringLiteral("xdg-open"), state->path});
         };
-        QObject::connect(state->process,
-                         QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                         context,
-                         [state, finish, startFallback, readError](int code, QProcess::ExitStatus status) {
-            if (!state->fallback) {
+        QObject::connect(
+            state->process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), context,
+            [state, finish, startFallback, readError](int code, QProcess::ExitStatus status) {
+                if (!state->fallback) {
+                    if (status == QProcess::NormalExit && code == 0) {
+                        finish(true, QString());
+                        return;
+                    }
+                    state->error = readError();
+                    startFallback();
+                    return;
+                }
                 if (status == QProcess::NormalExit && code == 0) {
                     finish(true, QString());
                     return;
                 }
-                state->error = readError();
-                startFallback();
-                return;
-            }
-            if (status == QProcess::NormalExit && code == 0) {
-                finish(true, QString());
-                return;
-            }
-            const QString detail = readError();
-            finish(false, detail.isEmpty() ?
-                (state->error.isEmpty() ? QStringLiteral("打开程序返回失败。") : state->error)
-                : detail);
-        });
+                const QString detail = readError();
+                finish(false, detail.isEmpty()
+                                  ? (state->error.isEmpty() ? QStringLiteral("打开程序返回失败。")
+                                                            : state->error)
+                                  : detail);
+            });
         QObject::connect(state->process, &QProcess::errorOccurred, context,
                          [state, startFallback, finish](QProcess::ProcessError error) {
-            if (state->completed || error != QProcess::FailedToStart)
-                return;
-            state->error = state->process->errorString();
-            if (!state->fallback)
-                startFallback();
-            else
-                finish(false, state->error.isEmpty() ?
-                    QStringLiteral("没有找到可以打开此文件的应用程序。") : state->error);
-        });
+                             if (state->completed || error != QProcess::FailedToStart)
+                                 return;
+                             state->error = state->process->errorString();
+                             if (!state->fallback)
+                                 startFallback();
+                             else
+                                 finish(false,
+                                        state->error.isEmpty()
+                                            ? QStringLiteral("没有找到可以打开此文件的应用程序。")
+                                            : state->error);
+                         });
         startOpener({QStringLiteral("gio"), QStringLiteral("open"), filePath});
     }
 };

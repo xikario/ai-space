@@ -72,7 +72,8 @@ class SmartSpaceWidget : public QWidget
     Q_OBJECT
     friend class SmartSpaceStartupTestAccess;
     friend class SmartSpaceOpticsTestAccess;
-public:
+
+  public:
     explicit SmartSpaceWidget(QWidget *parent = nullptr);
     ~SmartSpaceWidget() override;
 
@@ -90,7 +91,7 @@ public:
     bool indexBusy() const { return m_libraryJobBusy || m_dialogJobBusy; }
     void showKnowledgeManager();
     void showKnowledgeStatus();
-    void pauseKnowledgeWork(){stopIdleFullIndex();}
+    void pauseKnowledgeWork() { stopIdleFullIndex(); }
     void hideFolder(const QString &path);
     void excludeFolder(const QString &path);
     void recreateNativeSurface(bool translucent);
@@ -108,8 +109,7 @@ public:
     QColor titleThemeColor() const { return m_textColor; }
     void refreshInheritedTheme();
 
-
-signals:
+  signals:
     void busyChanged();
     void indexLoaded();
     void closeRequested();
@@ -118,7 +118,7 @@ signals:
     void alwaysOnTopChanged(bool enabled);
     void geometryChanged();
 
-protected:
+  protected:
     bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void moveEvent(QMoveEvent *event) override;
@@ -130,11 +130,8 @@ protected:
     void contextMenuEvent(QContextMenuEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
-private:
-    enum ItemRole {
-        PathRole = Qt::UserRole + 1,
-        FolderLevelRole
-    };
+  private:
+    enum ItemRole { PathRole = Qt::UserRole + 1, FolderLevelRole };
 
     int hitResizeEdges(const QPoint &pos) const;
     void updateResizeCursor(const QPoint &pos);
@@ -143,23 +140,21 @@ private:
     void applyTheme();
     void applyMenuTheme(QMenu *menu) const;
     void configureIndexScheduling();
-    QWidget *createPanel(const QString &title, QWidget *content,
-                         const QString &objectName);
+    QWidget *createPanel(const QString &title, QWidget *content, const QString &objectName);
     QListWidget *createEntryList();
     void restoreSettings();
     void saveSettings() const;
     QPoint boundedPosition(const QPoint &position) const;
     void updateRoundedMask();
     QString entryToolTip(const SmartSpaceEntry &entry) const;
-    QString relevantSnippetHtml(const SmartSpaceEntry &entry,
-                                int maxContexts, int before, int after) const;
+    QString relevantSnippetHtml(const SmartSpaceEntry &entry, int maxContexts, int before,
+                                int after) const;
     void updateActionState();
     void rebuildFileScopePill();
     void rebuildCategoryPills();
     void showHeaderMenu();
     void updateResponsiveLayout();
-    QWidget *createFileCard(const SmartSpaceEntry &entry,
-                            QListWidgetItem *item);
+    QWidget *createFileCard(const SmartSpaceEntry &entry, QListWidgetItem *item);
     const SmartSpaceEntry *entryForPath(const QString &path) const;
     void showPreviewForPath(const QString &path);
     void readLibraryPreview(const SmartSpaceEntry &entry, int offset = -1);
@@ -189,12 +184,13 @@ private:
         QString statusPrefix, statusSuffix, error;
         bool valid = false;
     };
-    static IndexSnapshot readIndexSnapshot(const QString &canonicalPath, const QString &streamFilename,
-        const QString &ocrPath, const QString &resumePath, const QStringList &excludedFolders, int maxItems);
+    static IndexSnapshot readIndexSnapshot(const QString &canonicalPath,
+                                           const QString &streamFilename, const QString &ocrPath,
+                                           const QString &resumePath,
+                                           const QStringList &excludedFolders, int maxItems);
     bool applyIndexSnapshot(IndexSnapshot snapshot);
     void loadIndexAsync();
     quint64 m_indexLoadRevision = 0;
-
 
     void rebuildWatches();
     void scheduleReindex();
@@ -203,8 +199,7 @@ private:
     void executeSearch();
     bool commitSearchQuery(const QString &query, bool showError);
     bool entryMatches(const SmartSpaceEntry &entry) const;
-    bool fileMatchesCurrentResults(const SmartSpaceEntry &entry,
-                                   bool respectScope = true) const;
+    bool fileMatchesCurrentResults(const SmartSpaceEntry &entry, bool respectScope = true) const;
     bool categoryMatches(const SmartSpaceEntry &entry) const;
     bool pathInsideScope(const QString &path) const;
     bool pathExcluded(const QString &path) const;
@@ -227,14 +222,15 @@ private:
 
     void showSettingsDialog();
     void startKnowledgeBuild();
-    void startKnowledgeRetry(const QString &db,const QJsonArray &ids,bool ocr);
-    void startGuidedBuild(bool ocr, bool ocrOnly = false, const QString &singleStage = QString(), const QString &targetDirectory = QString(), bool providerApproved = false);
+    void startKnowledgeRetry(const QString &db, const QJsonArray &ids, bool ocr);
+    void startGuidedBuild(bool ocr, bool ocrOnly = false, const QString &singleStage = QString(),
+                          const QString &targetDirectory = QString(),
+                          bool providerApproved = false);
     void startKnowledgeSearch(const QString &query);
     void applyKnowledgeSearchResult(const QJsonObject &result);
     QPointer<QProcess> m_knowledgeSearchProcess;
     quint64 m_knowledgeSearchRevision = 0;
-    void startKnowledgeTask(const QString &task,
-                            const QStringList &arguments);
+    void startKnowledgeTask(const QString &task, const QStringList &arguments);
     void terminateKnowledgeProcess(bool force);
     void handleKnowledgeOutput();
     void finishKnowledgeTask(int exitCode, int exitStatus);
@@ -275,9 +271,9 @@ private:
     QString m_ocrLanguages = QStringLiteral("chi_sim+eng");
     bool m_dialogJobBusy = false;
     struct KnowledgeUiState {
-        bool managerVisible=false;
-        bool failuresVisible=false;
-        bool migrationPending=false;
+        bool managerVisible = false;
+        bool failuresVisible = false;
+        bool migrationPending = false;
     } m_uiState;
     bool m_libraryJobBusy = false;
     QPointer<QProcess> m_libraryPreviewProcess;
@@ -288,16 +284,16 @@ private:
     QHash<QString, QString> m_knowledgeExtractionStates;
     QHash<QString, QString> m_knowledgeAvailability;
     QJsonObject m_knowledgeLastObject;
-    QColor m_surfaceColor {15, 23, 42};
-    QColor m_cardColor {2, 6, 23, 180};
-    QColor m_borderColor {148, 163, 184, 45};
-    QColor m_textColor {241, 245, 249};
-    QColor m_mutedColor {148, 163, 184};
-    QColor m_accentColor {99, 102, 241};
+    QColor m_surfaceColor{15, 23, 42};
+    QColor m_cardColor{2, 6, 23, 180};
+    QColor m_borderColor{148, 163, 184, 45};
+    QColor m_textColor{241, 245, 249};
+    QColor m_mutedColor{148, 163, 184};
+    QColor m_accentColor{99, 102, 241};
     // ---- Custom theme overrides (themeMode == 6) ----
-    int    m_customBaseSkin = 0;
-    int    m_customOpacity = 100;
-    bool   m_customColorsEnabled = false;
+    int m_customBaseSkin = 0;
+    int m_customOpacity = 100;
+    bool m_customColorsEnabled = false;
     QColor m_customSurface;
     QColor m_customCard;
     QColor m_customBorder;
@@ -314,8 +310,8 @@ private:
     QColor m_customMenuText;
     QColor m_customMenuHover;
     QString m_customFontFamily;
-    int     m_customFontSize = 13;
-    bool    m_customFontBold = false;
+    int m_customFontSize = 13;
+    bool m_customFontBold = false;
     bool m_editMode = false;
     bool m_reindexPending = false;
     bool m_dragging = false;
@@ -329,7 +325,6 @@ private:
     bool m_settingsViewVisible = false;
     QPoint m_dragOffset;
     QTimer m_geometrySaveTimer;
-
 
     QFrame *m_actionRail = nullptr;
     QWidget *m_contentContainer = nullptr;
