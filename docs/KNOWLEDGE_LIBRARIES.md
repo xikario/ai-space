@@ -32,7 +32,7 @@ AIKB v1 是带应用标识和清单的 SQLite 文件，不是需要解压的 ZIP
 
 ## 检索和其他 Agent
 
-GUI、安装后的 SKILL 和旧 worker 的 search 子命令共用 knowledge_library.py。新入口为 ai-space-index-query，支持旧数据库覆盖环境变量。本机共享的 Fences SKILL CLI 已备份并转向同一新入口，兼容 --status、--fetch 和旧 --json 查询形式；其他电脑推荐安装导出的新 SKILL。
+GUI、安装后的 SKILL 和旧 worker 的 search 子命令共用 knowledge_library.py。新入口为 ai-space-index-query，支持旧数据库覆盖环境变量。查询桥保留 --status、--fetch 和旧 --json 查询形式；原有 Fences SKILL 需要同步更新脚本及查询核心，新安装推荐使用新名称。
 
 快速模式先查每文档一行的文件名元数据，再按需执行 FTS5；正文候选逐项读取，跳过长文档的重复片段，避免少数大文件占满候选窗口。默认交互预算 2 秒，取消或新查询会淘汰旧结果。超时、候选截断、未查询和不可用的库都会在 JSON 中标注，不冒充完整阴性结论。
 
@@ -54,7 +54,9 @@ python3 "$S" search --all --body-only --query '宁波银行 部署' --budget-ms 
 python3 "$S" fetch --reference 'aispace://库ID/版本/文档ID/片段ID' --limit 8
 ```
 
-在设置的 Skill 页导出整个 Skill 目录，包含独立 knowledge_library.py。把它和 .aikb 文件交给另一工具或 Agent，不需要安装 GUI、Qt、OCR 或原文件。要求 Python 3.7+ 和启用 FTS5 的 SQLite；单文件读取路径不依赖 Linux OCR 控制模块。格式不绑定 ARM/x86，当前实机验证为本机 ARM/Linux，未把未运行的 x86/其他系统测试计为通过。
+在设置的 Skill 页导出整个 Skill 目录，包含独立 knowledge_library.py。把它和 .aikb 文件交给另一工具或 Agent，不需要安装 GUI、Qt、OCR 或原文件。要求 Python 3.8+ 和启用 FTS5 的 SQLite；单文件读取路径不依赖 Linux OCR 控制模块。格式不绑定 ARM/x86；离线副本由跨架构 CI 验证，其他操作系统仍需单独验证。
+
+安装位置和完整目录要求见 [Agent 接入说明](../apps/ai-space/skills/ai-space-index-query/references/agent-setup.md)。
 
 默认从 AI空间配置读取个人库目录；可在子命令前传 --db，或设置 AI_SPACE_KNOWLEDGE_DB，兼容 UKUI_FENCES_KNOWLEDGE_DB。知识库注册在 $XDG_CONFIG_HOME/ai-space/libraries.json。
 
