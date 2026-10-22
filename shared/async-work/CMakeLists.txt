@@ -1,5 +1,7 @@
 find_package(Qt5 REQUIRED COMPONENTS Core)
 find_package(Threads REQUIRED)
+add_library(async-work INTERFACE)
+target_include_directories(async-work INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 if(BUILD_TESTING)
     add_executable(background-task-test tests/test.cpp)
     target_link_libraries(background-task-test PRIVATE Qt5::Core Threads::Threads)

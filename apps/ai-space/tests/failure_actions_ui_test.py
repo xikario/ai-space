@@ -15,7 +15,7 @@ def check(ok,label):
     if not ok:raise AssertionError(label)
     print('PASS:',label,flush=True)
 def call(method):
-    value=subprocess.check_output(['gdbus','call','--session','--dest','org.ukui.AiSpace','--object-path','/aiSpace','--method','org.ukui.AiSpace.'+method],text=True,stderr=subprocess.DEVNULL)
+    value=subprocess.check_output(['gdbus','call','--session','--dest','io.github.xikario.AiSpace','--object-path','/aiSpace','--method','io.github.xikario.AiSpace.'+method],text=True,stderr=subprocess.DEVNULL)
     return json.loads(ast.literal_eval(value)[0]) if method=='status' else value
 def wait(predicate,label):
     deadline=time.monotonic()+15

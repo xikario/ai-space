@@ -97,11 +97,7 @@ public:
     int indexedEntryCount() const;
     int resultCount() const;
     void searchFor(const QString &query);
-    void setGlassOpticsEnabled(bool enabled, bool persist = true);
-    bool glassOpticsEnabled() const { return false; }
     void setSimpleTheme(int mode, bool persist = true);
-    bool edgeHidden() const { return false; }
-    bool edgeTransitionActive() const { return false; }
     bool isWindowMaximized() const { return m_isMaximized || isMaximized(); }
     void setWindowMaximized(bool maximized);
     void toggleMaximized();

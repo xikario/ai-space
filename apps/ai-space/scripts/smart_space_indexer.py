@@ -1019,14 +1019,15 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
     request = provider_request(provider, roots)
     timeout = max(1, min(int(provider.get("timeout", 30)), 300))
     if kind == "command":
-        program = os.path.expandvars(str(provider.get("program", "")))
+        from provider_policy import verify_command
+        program = verify_command(provider)
         arguments = provider.get("arguments", [])
         if not program or not isinstance(arguments, list):
             raise ValueError("command provider requires program and arguments")
         import tempfile,resource
         def output_limit():resource.setrlimit(resource.RLIMIT_FSIZE,(4*1024*1024,4*1024*1024))
         with tempfile.TemporaryFile() as output,tempfile.TemporaryFile() as errors:
-            child=subprocess.Popen([program,*[os.path.expandvars(str(v)) for v in arguments]],stdin=subprocess.PIPE,stdout=output,stderr=errors,preexec_fn=output_limit)
+            child=subprocess.Popen([program,*arguments],stdin=subprocess.PIPE,stdout=output,stderr=errors,preexec_fn=output_limit)
             try:child.communicate(json.dumps(request,ensure_ascii=False).encode(),timeout=timeout)
             except BaseException:child.kill();child.wait();raise
             output.seek(0);data=output.read(4*1024*1024+1);errors.seek(0)

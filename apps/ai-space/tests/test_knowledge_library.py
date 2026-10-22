@@ -427,7 +427,9 @@ class KnowledgeLibraryTest(unittest.TestCase):
     def test_final_provider_command_and_dbus_output_are_bounded(self):
         import smart_space_indexer as indexer
         with self.assertRaises((RuntimeError,ValueError)):
-            indexer.run_provider(dict(type='command',program=sys.executable,arguments=['-c','print("x"*(5*1024*1024))']),[])
+            from provider_policy import command_identity
+            program, identity = command_identity(sys.executable)
+            indexer.run_provider(dict(type='command',program=program,_programIdentity=identity,arguments=['-c','print("x"*(5*1024*1024))']),[])
         tools=self.root/'bin';tools.mkdir();bus=tools/'gdbus'
         bus.write_text('#!'+sys.executable+'\nprint("x"*(5*1024*1024))\n');bus.chmod(0o755)
         with mock.patch.dict(os.environ,PATH=str(tools)+os.pathsep+os.environ.get('PATH','')):

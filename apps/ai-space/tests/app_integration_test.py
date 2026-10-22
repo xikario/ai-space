@@ -25,8 +25,8 @@ def checked(value, message):
     print('PASS:', message, flush=True)
 def call(method, *arguments):
     result = subprocess.check_output(['gdbus', 'call', '--session', '--timeout', '5',
-        '--dest', 'org.ukui.AiSpace', '--object-path', '/aiSpace',
-        '--method', 'org.ukui.AiSpace.' + method, *map(str, arguments)], text=True)
+        '--dest', 'io.github.xikario.AiSpace', '--object-path', '/aiSpace',
+        '--method', 'io.github.xikario.AiSpace.' + method, *map(str, arguments)], text=True)
     return ast.literal_eval(result)[0] if method == 'status' else result
 def state():
     try:
@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
     log=root/'app.log'
     process=subprocess.Popen([str(binary),'--show'],env=env,stdout=log.open('w'),stderr=subprocess.STDOUT)
     try:
-        ready=wait(lambda s:s.get('ready') and s.get('visible') and s.get('indexedEntries')==3 and s.get('glassBackend')=='solid',
+        ready=wait(lambda s:s.get('ready') and s.get('visible') and s.get('indexedEntries')==3 and s.get('statusVersion')==1,
             'independent window restores legacy index without Fences')
         pid=ready['pid'];checked(not ready.get('indexBusy'),'opening does not start a document scan')
         checked(ready['navigationGroups']==2,'startup groups files by their actual parent paths')
@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
                 pid=ready['pid']
             else:connection.commit()
         wait(lambda s:s.get('ready') and not s.get('migrationPending'),'background knowledge import finishes')
-        checked(ready['glassBackend']=='solid' and not ready['glassOptics'] and not ready['usedGpu'] and ready['maximizable'],'solid theme has no glass shader and supports window controls')
+        checked(ready['statusVersion']==1 and ready['maximizable'],'versioned status and standard window controls are available')
         call('toggleMaximize')
         wait(lambda s:s.get('maximized'),'window maximizes')
         call('toggleMaximize')
@@ -239,16 +239,12 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
         checked('_NET_WM_WINDOW_TYPE_NORMAL' in native and 'ai-space' in native and '_NET_WM_ICON(CARDINAL)' in native,'normal application window has its own taskbar identity and icon')
         subprocess.run([str(binary),'--show'],env=env,check=True,timeout=10)
         checked(state()['pid']==pid,'second launch reuses the existing instance')
-        call('setGlassOptics','true')
-        checked(not state()['glassOptics'] and state()['glassBackend']=='solid','legacy effect request cannot re-enable glass rendering')
-        builds=state()['materialBuilds']
         call('search','宁波银行')
         wait(lambda s:s.get('results')==2 and s.get('navigationGroups')==1,'actual search UI filters imported documents and navigation groups')
-        checked(state()['materialBuilds']==builds,'search does not build glass materials')
-        call('hideWindow');wait(lambda s:not s.get('visible') and s.get('minimized') and not s.get('edgeHidden'),'legacy hide minimizes to the normal taskbar')
+        call('hideWindow');wait(lambda s:not s.get('visible') and s.get('minimized'),'legacy hide minimizes to the normal taskbar')
         call('showWindow');wait(lambda s:s.get('visible'),'hidden application can be restored')
-        call('hideToEdge');wait(lambda s:s.get('minimized') and not s.get('edgeHidden') and s.get('width',0)>=620,'retired edge command minimizes without creating a star entry')
-        call('revealFromEdge');wait(lambda s:s.get('visible') and not s.get('minimized') and not s.get('edgeHidden'),'retired reveal command restores the normal window')
+        call('hideWindow');wait(lambda s:s.get('minimized') and s.get('width',0)>=620,'retired edge command minimizes without creating a star entry')
+        call('showWindow');wait(lambda s:s.get('visible') and not s.get('minimized'),'retired reveal command restores the normal window')
         call('showSettings');wait(lambda s:s.get('settingsVisible'),'settings page opens')
         if window_ui:
             normal_size=(state()['width'],state()['height'])
@@ -266,7 +262,7 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
             checked(abs(restored['width']-normal_size[0])<=2 and abs(restored['height']-normal_size[1])<=2,
                 'closing maximized preserves the normal window size on restart')
         call('showWindow')
-        wait(lambda s:s.get('glassBackend')=='solid' and s.get('materialBuilds')==0 and not s.get('usedGpu'),'solid surface is independent of system wallpaper')
+        wait(lambda s:s.get('statusVersion')==1 and s.get('visible'),'normal window restores without wallpaper effects')
         call('quit');checked(process.wait(timeout=10)==0,'minimized startup instance exits normally')
         current_config=config/'xikario/ai-space.ini'
         text=current_config.read_text()
@@ -276,7 +272,7 @@ with tempfile.TemporaryDirectory(prefix='ai-space-app-') as directory:
         process=subprocess.Popen([str(binary),'--autostart'],env=env,stdout=log.open('a'),stderr=subprocess.STDOUT)
         wait(lambda s:s.get('ready') and s.get('minimized') and not s.get('indexLoading'),'login start minimizes to the normal taskbar')
         time.sleep(.35)
-        checked(not state()['edgeHidden'] and state()['minimized'] and state()['width']>=620,
+        checked(state()['minimized'] and state()['width']>=620,
             'login start stays minimized without a retired edge entry')
         checked('defaultHidden=' not in current_config.read_text(),'obsolete startup hiding preference is removed')
         if window_ui:

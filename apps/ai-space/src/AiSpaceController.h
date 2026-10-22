@@ -10,9 +10,15 @@ class SmartSpaceWidget;
 class QSystemTrayIcon;
 class QFileSystemWatcher;
 class QWidget;
+#ifdef AI_SPACE_TEST_CONTROL
+#define AI_SPACE_TEST_SLOT Q_SCRIPTABLE
+#else
+#define AI_SPACE_TEST_SLOT
+#endif
+
 class AiSpaceController final : public QObject {
     Q_OBJECT
-    Q_CLASSINFO("D-Bus Interface","org.ukui.AiSpace")
+    Q_CLASSINFO("D-Bus Interface","io.github.xikario.AiSpace")
 public:
     explicit AiSpaceController(QObject *parent=nullptr);
     ~AiSpaceController() override;
@@ -22,27 +28,24 @@ public slots:
     Q_SCRIPTABLE void hideWindow();
     Q_SCRIPTABLE void toggleWindow();
     Q_SCRIPTABLE void showSettings();
-    Q_SCRIPTABLE void showKnowledgeManager();
-    Q_SCRIPTABLE void showKnowledgeStatus();
+    AI_SPACE_TEST_SLOT void showKnowledgeManager();
+    AI_SPACE_TEST_SLOT void showKnowledgeStatus();
     Q_SCRIPTABLE void quit();
     Q_SCRIPTABLE QString status() const;
-    Q_SCRIPTABLE void search(const QString &query);
-    Q_SCRIPTABLE void setAlwaysOnTop(bool value);
-    Q_SCRIPTABLE void setAutoStart(bool value);
-    Q_SCRIPTABLE void hideToEdge();
-    Q_SCRIPTABLE void revealFromEdge();
-    Q_SCRIPTABLE void moveWindow(int x,int y);
-    Q_SCRIPTABLE void resizeWindow(int width,int height);
-    Q_SCRIPTABLE void minimizeWindow();
-    Q_SCRIPTABLE void maximizeWindow();
-    Q_SCRIPTABLE void restoreWindow();
-    Q_SCRIPTABLE void toggleMaximize();
-    Q_SCRIPTABLE void setDensity(int value);
-    Q_SCRIPTABLE void setGlassOptics(bool value);
-    Q_SCRIPTABLE void startFullIndex();
-    Q_SCRIPTABLE void pauseKnowledgeTask();
-    Q_SCRIPTABLE void hideFolder(const QString &path);
-    Q_SCRIPTABLE void excludeFolder(const QString &path);
+    AI_SPACE_TEST_SLOT void search(const QString &query);
+    AI_SPACE_TEST_SLOT void setAlwaysOnTop(bool value);
+    AI_SPACE_TEST_SLOT void setAutoStart(bool value);
+    AI_SPACE_TEST_SLOT void moveWindow(int x,int y);
+    AI_SPACE_TEST_SLOT void resizeWindow(int width,int height);
+    AI_SPACE_TEST_SLOT void minimizeWindow();
+    AI_SPACE_TEST_SLOT void maximizeWindow();
+    AI_SPACE_TEST_SLOT void restoreWindow();
+    AI_SPACE_TEST_SLOT void toggleMaximize();
+    AI_SPACE_TEST_SLOT void setDensity(int value);
+    AI_SPACE_TEST_SLOT void startFullIndex();
+    AI_SPACE_TEST_SLOT void pauseKnowledgeTask();
+    AI_SPACE_TEST_SLOT void hideFolder(const QString &path);
+    AI_SPACE_TEST_SLOT void excludeFolder(const QString &path);
 signals:
     void stateChanged(const QString &json);
 private:
@@ -60,3 +63,4 @@ private:
     QElapsedTimer m_startup;
     qint64 m_uiReadyMs=-1,m_indexReadyMs=-1;
 };
+#undef AI_SPACE_TEST_SLOT

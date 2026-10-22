@@ -6,13 +6,15 @@
 
 ## 构建与运行
 
-需要 CMake 3.16+、C++17、Qt 5.12+（Core、Gui、Widgets、DBus、Network）、Zlib、Python 3.7+。常见 Debian/Ubuntu 开发包：`build-essential cmake qtbase5-dev zlib1g-dev`。运行需要图形会话及会话 D-Bus；当前重点支持 X11。
+需要 CMake 3.16+、C++17、Qt 5.12+（Core、Gui、Widgets、DBus、Network）、Zlib、Python 3.8+。常见 Debian/Ubuntu 开发包：`build-essential cmake qtbase5-dev zlib1g-dev`。运行需要图形会话及会话 D-Bus；当前重点支持 X11。
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j2
 ./build/ai-space --show
 ```
+
+开发构建会在构建目录生成相对路径的运行时副本；正式安装仅从自身安装前缀定位脚本和 Skill，不回退到开发者源码目录。源码中的 Python 工具修改后需重新执行构建以同步副本。
 
 系统缺少 Qt 开发文件时，可用 `-DAI_SPACE_QT_SDK_ROOT=/path/to/sdk`。无需引用另一个项目的源码。
 

@@ -1,5 +1,6 @@
 #include "AiSpaceController.h"
-#include "../../../shared/async-work/BackgroundTask.h"
+#include "AppConfig.h"
+#include "BackgroundTask.h"
 #include <QApplication>
 #include <QDBusConnection>
 #include <QDBusInterface>
@@ -13,17 +14,17 @@ int main(int argc,char **argv)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication app(argc,argv);BackgroundTask::ApplicationScope workers;
     app.setApplicationName("ai-space");app.setApplicationDisplayName(QStringLiteral("AI空间"));
-    app.setOrganizationName("xikario");app.setApplicationVersion("0.1.1");app.setDesktopFileName("ai-space");
+    app.setOrganizationName("xikario");app.setApplicationVersion(QStringLiteral(AI_SPACE_VERSION));app.setDesktopFileName("ai-space");
     app.setWindowIcon(QIcon(":/app/icon.png"));app.setQuitOnLastWindowClosed(false);
     QCommandLineParser parser;parser.setApplicationDescription(QStringLiteral("AI空间 · 本地文件、OCR与知识库检索"));parser.addHelpOption();parser.addVersionOption();
     for(const auto &name:{"show","hide","toggle","settings","quit","status","autostart"})parser.addOption(QCommandLineOption(QStringList{name},name));
     parser.process(app);
     const QString method=parser.isSet("quit")?"quit":parser.isSet("status")?"status":parser.isSet("settings")?"showSettings":parser.isSet("hide")?"hideWindow":parser.isSet("toggle")?"toggleWindow":"showWindow";
     auto bus=QDBusConnection::sessionBus();
-    if(!bus.registerService("org.ukui.AiSpace")) {
+    if(!bus.registerService("io.github.xikario.AiSpace")) {
         // A duplicate session-autostart must never surface an existing window.
         if(parser.isSet("autostart"))return 0;
-        QDBusInterface existing("org.ukui.AiSpace","/aiSpace","org.ukui.AiSpace",bus);existing.setTimeout(3000);
+        QDBusInterface existing("io.github.xikario.AiSpace","/aiSpace","io.github.xikario.AiSpace",bus);existing.setTimeout(3000);
         const auto reply=existing.call(method);
         if(reply.type()==QDBusMessage::ErrorMessage){std::fprintf(stderr,"%s\n",qPrintable(reply.errorMessage()));return 1;}
         if(method=="status" && !reply.arguments().isEmpty())std::printf("%s\n",qPrintable(reply.arguments().first().toString()));

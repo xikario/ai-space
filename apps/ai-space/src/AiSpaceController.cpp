@@ -1,7 +1,8 @@
 #include "AiSpaceController.h"
+#include "AppConfig.h"
 #include "SmartSpaceWidget.h"
 #include "Migration.h"
-#include "../../../shared/async-work/BackgroundTask.h"
+#include "BackgroundTask.h"
 #include <QApplication>
 #include <QPushButton>
 #include <memory>
@@ -130,7 +131,7 @@ void AiSpaceController::initialize(bool visible,bool settings)
 }
 void AiSpaceController::showKnowledgeStatus(){perform([](SmartSpaceWidget *widget){QTimer::singleShot(0,widget,&SmartSpaceWidget::showKnowledgeStatus);});}
 void AiSpaceController::showKnowledgeManager(){perform([](SmartSpaceWidget *widget){QTimer::singleShot(0,widget,&SmartSpaceWidget::showKnowledgeManager);});}
-void AiSpaceController::perform(std::function<void(SmartSpaceWidget*)> action) { if(m_widget)action(m_widget);else if(m_pending.size()<64)m_pending.append(std::move(action)); }
+void AiSpaceController::perform(std::function<void(SmartSpaceWidget*)> action) { if(m_widget)action(m_widget);else if(m_pending.size()<64)m_pending.append(std::move(action));else qWarning("AI Space startup action queue is full; request rejected"); }
 void AiSpaceController::applyWindowMode() {
     if(!m_widget)return;const bool visible=m_widget->isVisible();const bool minimized=m_widget->isMinimized();const QPoint p=m_widget->pos();
     m_widget->setWindowFlags(Qt::Window|Qt::FramelessWindowHint|Qt::WindowMinimizeButtonHint|Qt::WindowMaximizeButtonHint|Qt::WindowCloseButtonHint|(m_widget->alwaysOnTop()?Qt::WindowStaysOnTopHint:Qt::WindowFlags()));
@@ -138,17 +139,14 @@ void AiSpaceController::applyWindowMode() {
 }
 void AiSpaceController::notify(){emit stateChanged(status());}
 QString AiSpaceController::status() const {
-    QJsonObject o{{"application","ai-space"},{"version","0.1.1"},{"ready",bool(m_widget)},{"pid",QCoreApplication::applicationPid()}};
+    QJsonObject o{{"application","ai-space"},{"version",QStringLiteral(AI_SPACE_VERSION)},{"statusVersion",1},{"ready",bool(m_widget)},{"pid",QCoreApplication::applicationPid()}};
     o.insert("migrationPending",m_migrationPending);o.insert("uiReadyMs",m_uiReadyMs);o.insert("indexReadyMs",m_indexReadyMs);
-    if(m_widget){o.insert("autoStart",m_widget->autoStart());o.insert("visible",m_widget->isVisible() && !m_widget->isMinimized());o.insert("edgeHidden",m_widget->edgeHidden());o.insert("indexBusy",m_widget->indexBusy());o.insert("alwaysOnTop",m_widget->alwaysOnTop());o.insert("glassOptics",m_widget->glassOpticsEnabled());o.insert("x",m_widget->x());o.insert("y",m_widget->y());o.insert("width",m_widget->width());o.insert("height",m_widget->height());
+    if(m_widget){o.insert("autoStart",m_widget->autoStart());o.insert("visible",m_widget->isVisible() && !m_widget->isMinimized());o.insert("indexBusy",m_widget->indexBusy());o.insert("alwaysOnTop",m_widget->alwaysOnTop());o.insert("x",m_widget->x());o.insert("y",m_widget->y());o.insert("width",m_widget->width());o.insert("height",m_widget->height());
         o.insert("indexedEntries",m_widget->indexedEntryCount());o.insert("results",m_widget->resultCount());
         o.insert("navigationGroups",m_widget->property("navigationGroups").toInt());
         o.insert("windowId",QString::number(m_widget->internalWinId()));
-        o.insert("materialBuilds",m_widget->property("smartGlassMaterialBuilds").toInt());
-        o.insert("glassBackend",m_widget->property("smartGlassMaterialBackend").toString());
         o.insert("previewVisible",m_widget->property("previewVisible").toBool());
         o.insert("previewDocked",m_widget->property("previewDocked").toBool());
-        o.insert("usedGpu",m_widget->property("smartGlassUsedGpu").toBool());
         o.insert("indexLoading",m_widget->property("indexLoading").toBool());
         o.insert("indexApplyMs",m_widget->property("indexApplyMs").toInt());
         o.insert("maximizable",bool(m_widget->windowFlags() & Qt::WindowMaximizeButtonHint));
@@ -166,7 +164,6 @@ QString AiSpaceController::status() const {
         }
         o.insert("libraryPreviewLoaded",m_widget->property("libraryPreviewLoaded").toBool());
         o.insert("settingsVisible",m_widget->settingsViewVisible());
-        o.insert("active",m_widget->edgeTransitionActive());
     }
     return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
 }
@@ -203,8 +200,6 @@ void AiSpaceController::quit()
 }
 void AiSpaceController::setAlwaysOnTop(bool v){perform([v](SmartSpaceWidget*w){w->setAlwaysOnTop(v);});}
 void AiSpaceController::setAutoStart(bool v){perform([v](SmartSpaceWidget*w){w->setAutoStart(v);});}
-void AiSpaceController::hideToEdge(){minimizeWindow();}
-void AiSpaceController::revealFromEdge(){showWindow();}
 void AiSpaceController::moveWindow(int x,int y){perform([=](SmartSpaceWidget*w){w->move(x,y);});}
 void AiSpaceController::resizeWindow(int x,int y){perform([=](SmartSpaceWidget*w){w->resize(qBound(620,x,2400),qBound(360,y,1600));});}
 void AiSpaceController::minimizeWindow(){perform([this](SmartSpaceWidget*w){w->minimizeWindow();notify();});}
@@ -212,7 +207,6 @@ void AiSpaceController::maximizeWindow(){perform([this](SmartSpaceWidget*w){w->s
 void AiSpaceController::restoreWindow(){perform([this](SmartSpaceWidget*w){w->setWindowMaximized(false);notify();});}
 void AiSpaceController::toggleMaximize(){perform([this](SmartSpaceWidget*w){w->toggleMaximized();notify();});}
 void AiSpaceController::setDensity(int v){perform([v](SmartSpaceWidget*w){w->setResultDensity(v);});}
-void AiSpaceController::setGlassOptics(bool v){perform([v](SmartSpaceWidget*w){w->setGlassOpticsEnabled(v);});}
 void AiSpaceController::pauseKnowledgeTask(){perform([](SmartSpaceWidget *w){w->pauseKnowledgeWork();});}
 void AiSpaceController::startFullIndex(){perform([](SmartSpaceWidget*w){QTimer::singleShot(0,w,&SmartSpaceWidget::startFastFullIndex);});}
 void AiSpaceController::hideFolder(const QString&p){perform([p](SmartSpaceWidget*w){w->hideFolder(p);});}

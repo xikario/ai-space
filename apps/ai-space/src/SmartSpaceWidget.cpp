@@ -1,7 +1,8 @@
 #include <QPaintEvent>
-#include "../../../shared/async-work/BackgroundTask.h"
+#include "BackgroundTask.h"
 #include <QDBusPendingCall>
 #include "SmartSpaceWidget.h"
+#include "AppConfig.h"
 #include "WindowTitleBarWidget.h"
 #include "KnowledgeManagerDialog.h"
 #include "KnowledgeFailuresDialog.h"
@@ -1435,9 +1436,6 @@ void SmartSpaceWidget::applyTheme()
     setAttribute(Qt::WA_StyledBackground, false);
     setAutoFillBackground(false);
 
-    setProperty("smartGlassMaterialBackend","solid");
-    setProperty("smartGlassMaterialBuilds",0);
-    setProperty("smartGlassUsedGpu",false);
 
     if (layout()) {
         const int m = isWindowMaximized() ? 0 : 1;
@@ -1690,13 +1688,6 @@ void SmartSpaceWidget::setSimpleTheme(int mode, bool persist)
     }
     if (persist)
         saveSettings();
-}
-
-void SmartSpaceWidget::setGlassOpticsEnabled(bool enabled, bool persist)
-{
-    // Retain the legacy process interface without re-enabling removed effects.
-    Q_UNUSED(enabled);
-    if (persist) saveSettings();
 }
 
 void SmartSpaceWidget::refreshInheritedTheme()
@@ -2211,7 +2202,7 @@ void SmartSpaceWidget::saveSettings() const
     settings.setValue(QStringLiteral("indexIntervalMinutes"),
                       m_indexIntervalMinutes);
     settings.setValue(QStringLiteral("themeMode"), m_themeMode);
-    settings.setValue(QStringLiteral("glassOptics"), false);
+    settings.remove(QStringLiteral("glassOptics"));
     settings.setValue(QStringLiteral("customBaseSkin"), m_customBaseSkin);
     settings.setValue(QStringLiteral("customOpacity"), m_customOpacity);
     settings.setValue(QStringLiteral("customColorsEnabled"), m_customColorsEnabled);
@@ -2432,14 +2423,11 @@ QString SmartSpaceWidget::providerConfigPath() const
 
 QString SmartSpaceWidget::indexerPath() const
 {
-    QStringList candidates;
-    const QString appDir = QCoreApplication::applicationDirPath();
-    candidates << appDir + QStringLiteral("/../libexec/ai-space/smart_space_indexer.py")
-               << QStringLiteral("/usr/libexec/ai-space/smart_space_indexer.py")
-               << QStringLiteral("/usr/lib/ai-space/smart_space_indexer.py");
-#ifdef AI_SPACE_INDEXER_PATH
-    candidates << QString::fromUtf8(AI_SPACE_INDEXER_PATH);
-#endif
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    const QStringList candidates{
+        appDir.filePath(QStringLiteral("libexec/ai-space/smart_space_indexer.py")),
+        appDir.filePath(QStringLiteral(AI_SPACE_LIBEXEC_RELATIVE "/smart_space_indexer.py"))
+    };
     for (const QString &candidate : candidates) {
         if (QFileInfo::exists(candidate))
             return QDir::cleanPath(candidate);
@@ -2449,17 +2437,11 @@ QString SmartSpaceWidget::indexerPath() const
 
 QString SmartSpaceWidget::knowledgeWorkerPath() const
 {
-    QStringList candidates;
-    const QString appDir = QCoreApplication::applicationDirPath();
-    candidates
-        << appDir + QStringLiteral(
-               "/../libexec/ai-space/smart_space_knowledge.py")
-        << QStringLiteral(
-               "/usr/libexec/ai-space/smart_space_knowledge.py")
-        << QStringLiteral("/usr/lib/ai-space/smart_space_knowledge.py");
-#ifdef AI_SPACE_KNOWLEDGE_WORKER_PATH
-    candidates << QString::fromUtf8(AI_SPACE_KNOWLEDGE_WORKER_PATH);
-#endif
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    const QStringList candidates{
+        appDir.filePath(QStringLiteral("libexec/ai-space/smart_space_knowledge.py")),
+        appDir.filePath(QStringLiteral(AI_SPACE_LIBEXEC_RELATIVE "/smart_space_knowledge.py"))
+    };
     for (const QString &candidate : candidates) {
         if (QFileInfo::exists(candidate))
             return QDir::cleanPath(candidate);
@@ -2486,14 +2468,11 @@ QString SmartSpaceWidget::knowledgeDbPath() const
 
 QString SmartSpaceWidget::skillDirectoryPath() const
 {
-    QStringList candidates;
-    candidates << QDir(QCoreApplication::applicationDirPath()).filePath(
-        QStringLiteral("../share/ai-space/skills/ai-space-index-query"));
-#ifdef AI_SPACE_INDEX_SKILL_PATH
-    candidates << QString::fromUtf8(AI_SPACE_INDEX_SKILL_PATH);
-#endif
-    const QString home=QDir::homePath();
-    candidates << QDir(home).filePath(QStringLiteral(".agents/skills/ai-space-index-query"));
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    const QStringList candidates{
+        appDir.filePath(QStringLiteral("share/ai-space/skills/ai-space-index-query")),
+        appDir.filePath(QStringLiteral(AI_SPACE_SKILL_RELATIVE))
+    };
     for(const auto &candidate:candidates) {
         const auto clean=QDir::cleanPath(candidate);
         if(QFileInfo(QDir(clean).filePath(QStringLiteral("SKILL.md"))).isFile())return clean;
@@ -2740,7 +2719,7 @@ void SmartSpaceWidget::startGuidedBuild(bool ocr,bool ocrOnly,const QString &sin
             if(code!=0 || report.value("digest").toString().isEmpty()){smartInformation(this,QStringLiteral("数据源配置不可用"),report.value("error").toString());return;}
             const QString digest=report.value("digest").toString();const auto capabilities=report.value("capabilities").toArray();
             if(!capabilities.isEmpty() && digest!=m_providerApprovedDigest){
-                QStringList lines{QStringLiteral("以下数据源将执行程序或联系外部服务。请核对来源后再允许；配置内容变化后会再次确认。")};
+                QStringList lines{QStringLiteral("以下数据源将执行程序或联系外部服务。请核对来源后再允许；配置、程序文件或解析路径变化后会再次确认。Command 程序以当前用户权限运行，授权不提供系统沙箱。")};
                 for(const auto &value:capabilities){const auto row=value.toObject();lines<<row.value("type").toString()+QStringLiteral(" · ")+row.value("target").toString();if(row.value("sendRootPaths").toBool())lines<<QStringLiteral("此数据源会接收资料目录路径。");}
                 if(smartQuestion(this,QStringLiteral("允许使用这些数据源？"),lines.join('\n'),QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
             }

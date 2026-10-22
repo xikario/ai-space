@@ -13,6 +13,7 @@ with tempfile.TemporaryDirectory(prefix='ai-space-package-') as temporary:
     root=Path(temporary)
     prefix=root/'prefix with spaces'
     subprocess.run(['cmake','--install',str(build),'--prefix',str(prefix)],check=True,stdout=subprocess.DEVNULL)
+    assert not (prefix/'bin/ai-space-test-driver').exists()
     desktop=(prefix/'share/applications/ai-space.desktop').read_text()
     assert 'Exec="'+str(prefix/'bin/ai-space')+'" --show' in desktop
     assert 'Icon='+str(prefix/'share/icons/hicolor/128x128/apps/ai-space.png') in desktop
@@ -52,4 +53,4 @@ with tempfile.TemporaryDirectory(prefix='ai-space-package-') as temporary:
     assert any(hit['path']==str(presentation) and hit['match_scope']=='body'
         and '旧版演示兼容提取验收' in hit['snippet'] for hit in hits),hits
     print('PASS: installed desktop entry, structured/legacy PPT extraction, SQLite search and Skill use the standalone package',flush=True)
-    subprocess.run([sys.executable,str(Path(__file__).with_name('app_integration_test.py')),str(prefix/'bin/ai-space')],env=environment,check=True,timeout=60)
+    subprocess.run([sys.executable,str(Path(__file__).with_name('public_api_test.py')),str(prefix/'bin/ai-space')],env=environment,check=True,timeout=60)
