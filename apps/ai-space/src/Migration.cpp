@@ -18,6 +18,21 @@ MigrationResult migrateLegacyData(bool includeKnowledge)
 {
     MigrationResult result;
     QSettings settings;
+    // Earlier upstream Qt builds used NativeFormat (.conf on Linux), while
+    // OEM Qt builds used .ini. Preserve the former only when no .ini exists.
+    const QString previousConfig = QStandardPaths::writableLocation(
+        QStandardPaths::ConfigLocation) + QStringLiteral("/xikario/ai-space.conf");
+    if (!QFileInfo::exists(settings.fileName()) && QFileInfo::exists(previousConfig)) {
+        QSettings previous(previousConfig, QSettings::IniFormat);
+        for (const QString &key : previous.allKeys())
+            settings.setValue(key, previous.value(key));
+        settings.sync();
+        if (previous.status() != QSettings::NoError || settings.status() != QSettings::NoError) {
+            result.ok = false;
+            result.error = QStringLiteral("无法导入旧版 .conf 设置；原配置已保留，请检查配置目录权限。");
+            return result;
+        }
+    }
     if(settings.value("migration/legacyV1",false).toBool()) return result;
     const QString config=QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
     const QString data=QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);

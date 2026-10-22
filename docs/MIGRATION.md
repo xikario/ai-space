@@ -6,6 +6,8 @@
 
 旧文件快照记录本机文件路径。迁移快照不等于迁移原文件；跨机器共享正文请使用 AIKB。应用不把资料内容或路径列表发布到 D-Bus 状态中。
 
+应用与 Python 读取端统一使用 `~/.config/xikario/ai-space.ini`（遵循 XDG）。旧 Qt 环境若曾创建 `ai-space.conf`，仅在 `.ini` 不存在时导入其偏好；已有 `.ini` 优先，旧文件保留。普通状态查询不会执行该迁移。
+
 ## 公共会话接口
 
 服务与接口均为 `io.github.xikario.AiSpace`，对象路径 `/aiSpace`。不再注册旧的 UKUI 命名空间。旧 Fences 客户端若硬编码旧服务名，需要更新调用方；使用 `ai-space --show` 的启动方式不受服务名变化影响。

@@ -18,6 +18,13 @@ with tempfile.TemporaryDirectory(prefix='ai-space-public-api-') as directory:
                PYTHONPATH='', PYTHONNOUSERSITE='1')
     # Even enabling legacy test environment flags must not export test controls.
     env['AI_SPACE_TEST_NO_BOOTSTRAP'] = '1'
+    preferences = home / 'config/xikario'
+    preferences.mkdir(parents=True)
+    old_settings = preferences / 'ai-space.conf'
+    old_settings.write_text('[migration]\nlegacyPreferencesV1=true\n'
+                            '[smartSpace]\nresultSortMode=2\n'
+                            '[compatibility]\nkeep=old-native-format\n', encoding='utf-8')
+    original_settings = old_settings.read_bytes()
     process = subprocess.Popen([str(binary), '--show'], env=env,
                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     def call(method, *arguments, check=True):
@@ -49,6 +56,10 @@ with tempfile.TemporaryDirectory(prefix='ai-space-public-api-') as directory:
         retired = {'glassOptics', 'edgeHidden', 'materialBuilds', 'glassBackend', 'usedGpu', 'active'}
         assert not retired.intersection(state), state
         assert state['statusVersion'] == 1 and not state['indexBusy']
+        ini_settings = preferences / 'ai-space.ini'
+        assert ini_settings.is_file()
+        assert 'keep=old-native-format' in ini_settings.read_text()
+        assert old_settings.read_bytes() == original_settings
         version = subprocess.check_output([str(binary), '--version'], env=env, text=True).strip().split()[-1]
         assert state['version'] == version
         for flag in ('--hide', '--show', '--settings'):
@@ -60,6 +71,22 @@ with tempfile.TemporaryDirectory(prefix='ai-space-public-api-') as directory:
         assert str(checkout / 'apps/ai-space/scripts').encode() not in binary.read_bytes()
         subprocess.run([str(binary), '--quit'], env=env, check=True, timeout=10)
         assert process.wait(timeout=10) == 0
+        # Existing canonical settings always win over a stale legacy file.
+        ini_settings.write_text(ini_settings.read_text().replace('old-native-format', 'canonical-format'))
+        process = subprocess.Popen([str(binary), '--hide'], env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            result = call('status', check=False)
+            if result.returncode == 0 and json.loads(ast.literal_eval(result.stdout)[0]).get('ready'):
+                break
+            time.sleep(.05)
+        else:
+            raise AssertionError('canonical settings restart did not become ready')
+        subprocess.run([str(binary), '--quit'], env=env, check=True, timeout=10)
+        assert process.wait(timeout=10) == 0
+        assert 'keep=canonical-format' in ini_settings.read_text()
+        assert old_settings.read_bytes() == original_settings
         print('PASS: production D-Bus allowlist, retired method rejection, single instance, version and relocatable runtime')
     finally:
         if process.poll() is None:
