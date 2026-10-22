@@ -1594,16 +1594,33 @@ def selected_paths(db=None, all_libraries=False, include_disabled=False):
     except (OSError, ValueError, TypeError) as exc:
         known = []
         registry_error = str(exc)
+
+    def path_key(value):
+        try:
+            return str(Path(value).expanduser().resolve())
+        except (OSError, ValueError, RuntimeError):
+            return os.path.abspath(os.path.expanduser(value))
+
     personal = db or configured_db()
     rows = []
-    if Path(personal).is_file():
-        match = next(
-            (r for r in known if Path(r["path"]).resolve() == Path(personal).resolve()), None
+    try:
+        if Path(personal).is_file():
+            match = next((r for r in known if path_key(r["path"]) == path_key(personal)), None)
+            rows.append(
+                dict(match) if match else dict(path=personal, name="个人知识库", read_only=False)
+            )
+    except (OSError, ValueError, RuntimeError) as error:
+        rows.append(
+            dict(
+                path=personal,
+                name="个人知识库",
+                available=False,
+                availability_error="无法读取该库：" + str(error),
+            )
         )
-        rows.append(dict(match) if match else dict(path=personal, name="个人知识库", read_only=False))
     if all_libraries:
-        seen = {str(Path(r["path"]).resolve()) for r in rows}
-        rows.extend(dict(r) for r in known if str(Path(r["path"]).resolve()) not in seen)
+        seen = {path_key(r["path"]) for r in rows}
+        rows.extend(dict(r) for r in known if path_key(r["path"]) not in seen)
     if registry_error and all_libraries:
         rows.append(
             dict(
@@ -1616,13 +1633,17 @@ def selected_paths(db=None, all_libraries=False, include_disabled=False):
     for row in rows:
         if not row.get("read_only"):
             continue
-        path = Path(row["path"])
-        row["available"] = path.is_file()
-        if row["available"]:
-            stat = path.stat()
-            row["available"] = row.get("format") == "legacy-sqlite" or (
-                stat.st_size == row["bytes"] and stat.st_mtime_ns == row["mtime_ns"]
-            )
+        try:
+            path = Path(row["path"])
+            row["available"] = path.is_file()
+            if row["available"]:
+                stat = path.stat()
+                row["available"] = row.get("format") == "legacy-sqlite" or (
+                    stat.st_size == row["bytes"] and stat.st_mtime_ns == row["mtime_ns"]
+                )
+        except (OSError, ValueError, RuntimeError) as error:
+            row["available"] = False
+            row["availability_error"] = "无法读取该库：" + str(error)
     return rows
 
 
@@ -1640,7 +1661,7 @@ def search_libraries(
                 dict(
                     path=library["path"],
                     status="not_queried" if remaining <= 0 else "unavailable",
-                    error=library.get("registry_error", ""),
+                    error=library.get("availability_error", library.get("registry_error", "")),
                 )
             )
             continue

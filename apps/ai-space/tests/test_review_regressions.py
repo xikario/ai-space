@@ -71,6 +71,31 @@ class ReviewRegressions(unittest.TestCase):
         self.assertFalse(lib.registry()["registry_warnings"])
         self.assertFalse(result["files_deleted"])
 
+    def test_unreadable_mounted_path_does_not_hide_other_libraries(self):
+        good = self.root / "good.aikb"
+        good.write_bytes(b"example")
+        info = good.stat()
+        with lib.registry_write() as catalog:
+            for identifier, path in (
+                ("00ba3702-1fcd-4b94-a281-fb49af624027", str(good)),
+                ("11ba3702-1fcd-4b94-a281-fb49af624027", "/" + "x" * 5000),
+            ):
+                catalog["libraries"].append(
+                    dict(
+                        path=path,
+                        library_id=identifier,
+                        version="1",
+                        bytes=info.st_size,
+                        mtime_ns=info.st_mtime_ns,
+                        read_only=True,
+                    )
+                )
+        selected = lib.selected_paths(str(self.root / "absent"), True, True)
+        self.assertEqual(len(selected), 2)
+        self.assertTrue(selected[0]["available"])
+        self.assertFalse(selected[1]["available"])
+        self.assertIn("无法读取", selected[1]["availability_error"])
+
     def test_broken_registry_has_explicit_recovery(self):
         path = lib.registry_path()
         path.parent.mkdir(parents=True)
