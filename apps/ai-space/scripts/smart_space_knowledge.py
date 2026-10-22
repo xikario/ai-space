@@ -192,7 +192,7 @@ def upgrade_space_error(path, stages):
     size_gib = os.path.getsize(path) / 1024 ** 3
     return RuntimeError(
         "旧库索引升级未完成（%s）：容量上限或磁盘空间不足。当前库约 %.2f GiB，"
-        "升级可能需要额外接近当前库大小的临时空间（粗略上界，不是精确需求）；"
+        "升级可能需要额外接近当前库大小的临时空间（仅供参考，实际临时空间可能更多）；"
         "请检查可用空间和单库上限，或在充足空间的副本上升级。已有正文未被清理，未自动放宽配额。" % ("、".join(stages), size_gib)
     )
 
