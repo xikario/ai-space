@@ -3,15 +3,19 @@
 #include <QJsonArray>
 #include <QPointer>
 class QCheckBox; class QComboBox; class QLabel; class QPlainTextEdit;
-class QProcess; class QPushButton; class QTableWidget;
+class JsonWorkerRequest; class QPushButton; class QTableWidget;
 
 class KnowledgeFailuresDialog final : public QDialog {
+    Q_OBJECT
 public:
     enum { Retry = 2 };
     KnowledgeFailuresDialog(const QString &db,const QString &worker,bool light,int cpu,int memory,QWidget *parent);
     ~KnowledgeFailuresDialog() override;
     QJsonArray retryIds() const { return m_retryIds; }
     bool includeOcr() const;
+    bool backgroundBusy() const { return m_busy; }
+signals:
+    void backgroundBusyChanged(bool busy);
 private:
     void load();
     void start(const QStringList &arguments,bool mutation=false);
@@ -20,7 +24,7 @@ private:
     void selectAllMatching();
     QJsonArray selectedIds() const;
     QString m_db,m_worker,m_notice,m_selectionToken;
-    QPointer<QProcess> m_process;
+    QPointer<JsonWorkerRequest> m_request;
     bool m_busy=false,m_writable=false,m_allSelected=false;
     int m_offset=0,m_total=0;
     QJsonArray m_retryIds,m_matchingIds;

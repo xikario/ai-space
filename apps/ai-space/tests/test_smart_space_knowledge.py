@@ -121,7 +121,7 @@ class KnowledgeWorkerTest(unittest.TestCase):
             self.assertTrue(lines[-1]["results"][0]["relaxed"])
             self.assertLess(lines[-1]["results"][0]["score"], 95)
 
-    def test_rejects_oversized_legacy_json_and_unknown_schema(self):
+    def test_rejects_malformed_large_json_and_unknown_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             legacy = os.path.join(directory, "legacy.json")
             db = os.path.join(directory, "knowledge.sqlite")
@@ -130,7 +130,7 @@ class KnowledgeWorkerTest(unittest.TestCase):
             completed, lines = self.run_worker(
                 "build", "--index-json", legacy, "--db", db, check=False)
             self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("too large", lines[-1]["error"])
+            self.assertIn("snapshot JSON", lines[-1]["error"])
             self.assertFalse(os.path.exists(db), 'invalid inventory must not create or change the database')
             with KNOWLEDGE.open_db(db) as handle:
                 handle.commit()

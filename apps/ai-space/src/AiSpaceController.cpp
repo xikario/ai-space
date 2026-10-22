@@ -1,3 +1,4 @@
+#include <QScreen>
 #include "AiSpaceController.h"
 #include "AppConfig.h"
 #include "SmartSpaceWidget.h"
@@ -70,7 +71,7 @@ void AiSpaceController::initialize(bool visible,bool settings)
         layout->setContentsMargins(24, 24, 24, 24);
         layout->addWidget(new QLabel(QStringLiteral("正在导入界面偏好与文件快照…"),dialog));
         dialog->resize(460,140);dialog->show();m_bootstrap=dialog;
-        connect(dialog,&QDialog::rejected,this,&AiSpaceController::quit);
+        // Esc only dismisses this temporary progress window; migration continues.
     }
     if(settings)m_pending.append([](SmartSpaceWidget *w){QTimer::singleShot(0,w,&SmartSpaceWidget::showSettings);});
     BackgroundTask::run(this,[]{
@@ -97,10 +98,7 @@ void AiSpaceController::initialize(bool visible,bool settings)
             }
             notify();
         });
-        for(auto *process:widget->findChildren<QProcess*>()) {
-            connect(process,&QProcess::started,this,&AiSpaceController::notify);
-            connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),this,[this]{notify();});
-        }
+        connect(widget,&SmartSpaceWidget::busyChanged,this,&AiSpaceController::notify);
         applyWindowMode();
         if(m_bootstrap){m_bootstrap->hide();m_bootstrap->deleteLater();}
         if(m_requestedVisible)showWindow();else widget->showMinimized();
@@ -200,7 +198,8 @@ void AiSpaceController::quit()
 }
 void AiSpaceController::setAlwaysOnTop(bool v){perform([v](SmartSpaceWidget*w){w->setAlwaysOnTop(v);});}
 void AiSpaceController::setAutoStart(bool v){perform([v](SmartSpaceWidget*w){w->setAutoStart(v);});}
-void AiSpaceController::moveWindow(int x,int y){perform([=](SmartSpaceWidget*w){w->move(x,y);});}
+void AiSpaceController::moveWindow(int x,int y){perform([=](SmartSpaceWidget*w){const QRect bounds=QGuiApplication::primaryScreen()->availableGeometry();
+        w->move(qBound(bounds.left()-w->width()+80,x,bounds.right()-80),qBound(bounds.top(),y,bounds.bottom()-60));});}
 void AiSpaceController::resizeWindow(int x,int y){perform([=](SmartSpaceWidget*w){w->resize(qBound(620,x,2400),qBound(360,y,1600));});}
 void AiSpaceController::minimizeWindow(){perform([this](SmartSpaceWidget*w){w->minimizeWindow();notify();});}
 void AiSpaceController::maximizeWindow(){perform([this](SmartSpaceWidget*w){w->setWindowMaximized(true);notify();});}

@@ -7,26 +7,28 @@ and writes one atomic JSON snapshot for the Qt widget.
 """
 
 import argparse
-import ast
 import datetime as dt
 import gzip
 import json
 import os
+import stat as stat_module
 import re
+import resource
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
-from xml.etree import ElementTree
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import xml_safety as ElementTree
+from snapshot_io import RecordList, ReuseMap, records
 from smart_space_extract import Extraction, EXTRACTOR_VERSION, detect_kind
 
 
@@ -38,7 +40,7 @@ MAX_EXTRACT_FILE_SIZE = 64 * 1024 * 1024
 MAX_OCR_PDF_PAGES = 5
 IGNORED_DIRS = {
     ".git", ".svn", ".hg", ".cache", ".local", ".config", ".Trash",
-    ".ts", "node_modules", "build", "build-clean", "build-v10",
+    ".ts", "node_modules",
     "__pycache__",
 }
 TEXT_SUFFIXES = {
@@ -166,15 +168,17 @@ def stat_ns(path: Path) -> int:
 
 def extract_plain_text(path: Path, limit: int) -> str:
     try:
-        raw = path.read_bytes()[: max(limit * 4, 262_144)]
-    except OSError:
+        from text_safety import text_lines
+        pieces = []
+        count = 0
+        for no, value in text_lines(path):
+            pieces.append(value[:max(0, limit-count)])
+            count += len(pieces[-1])
+            if count >= limit:
+                break
+        return compact_text(''.join(pieces), limit)
+    except (OSError, ValueError):
         return ""
-    for encoding in ("utf-8", "gb18030", "utf-16"):
-        try:
-            return compact_text(raw.decode(encoding), limit)
-        except UnicodeError:
-            continue
-    return compact_text(raw.decode("utf-8", errors="ignore"), limit)
 
 
 def iter_zip_xml_text(path: Path) -> Iterable[str]:
@@ -191,7 +195,7 @@ def iter_zip_xml_text(path: Path) -> Iterable[str]:
                 candidates.append(name)
         for name in sorted(candidates):
             try:
-                data = archive.read(name)
+                data = ElementTree.member(archive, name)
                 root = ElementTree.fromstring(data)
             except (KeyError, OSError, ValueError, ElementTree.ParseError):
                 continue
@@ -328,9 +332,12 @@ def ocr_image(path: Path, limit: int, timeout: int = 45) -> str:
     from ocr_budget import run_ocr
     with tempfile.TemporaryFile() as output:
         try:
-            result=run_ocr([tesseract,str(path),"stdout","-l","chi_sim+eng"],stdout=output,timeout=timeout)
+            from ocr_environment import command
+            result=run_ocr(command(path),stdout=output,timeout=timeout)
             output.seek(0);value=output.read(max(1024,limit*8)).decode("utf-8",errors="ignore") if result.returncode==0 else ""
-        except (OSError,subprocess.SubprocessError):value=""
+        except (OSError,subprocess.SubprocessError) as error:
+            if isinstance(error,InterruptedError):raise
+            value=""
     return compact_text(value, limit)
 
 
@@ -367,7 +374,8 @@ def ocr_pdf(path: Path, limit: int, max_pages: int,
                      "-singlefile", "-r", "150", "-png", str(path), str(prefix)],
                     stdout=subprocess.DEVNULL, timeout=180,
                 )
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError) as error:
+                if isinstance(error,InterruptedError):raise
                 continue
             if not image.exists():
                 # Fixed-page incremental mode may ask for more pages than the
@@ -439,7 +447,7 @@ def extract_content(path: Path, ocr_images: bool, limit: int,
             kind = detect_kind(path)
         except (OSError, ValueError, ImportError, zipfile.BadZipFile):
             kind = "unknown"
-        if kind in {"docx", "xlsx", "pptx", "odf", "xls", "doc"}:
+        if kind in {"docx", "xlsx", "pptx", "odf", "xls", "doc", "ppt-binary"}:
             extractor = ("wps-zip" if suffix in LEGACY_OFFICE_SUFFIXES
                          and kind in {"docx", "xlsx", "pptx", "odf"}
                          else "xlrd-xls" if kind == "xls" else "structured-" + kind)
@@ -451,10 +459,7 @@ def extract_content(path: Path, ocr_images: bool, limit: int,
             spreadsheet = extract_xlrd_spreadsheet(path, limit)
             if spreadsheet:
                 return spreadsheet, "xlrd-wps-et" if suffix == ".et" else "xlrd-xls"
-        legacy = extract_legacy_office(path, limit)
-        extractor = ("wps-binary-text" if suffix in {".wps", ".dps", ".et"}
-                     else "binary-strings")
-        return legacy, extractor
+        return "", "unsupported-container"
     if suffix in IMAGE_SUFFIXES and ocr_images:
         value = ocr_image(path, limit)
         return value, "tesseract" if value else "tesseract-empty"
@@ -502,7 +507,7 @@ def entry_for(path: Path, root: Path, is_dir: bool, ocr_images: bool,
               content_budget: List[int], ocr_pdf_pages: int,
               read_tags: bool) -> Dict:
     try:
-        stat = path.stat()
+        stat = path.lstat()
     except OSError:
         stat = None
     meta_mtime_ns = stat_ns(metadata_path(path, is_dir)) if read_tags else 0
@@ -531,6 +536,7 @@ def entry_for(path: Path, root: Path, is_dir: bool, ocr_images: bool,
                     and ocr_images and ocr_pdf_pages == 0)
     should_extract = (content_budget[0] > 0 or full_pdf_ocr) and os.environ.get("AI_SPACE_METADATA_ONLY") != "1"
     if (not reusable and not is_dir and stat
+            and stat_module.S_ISREG(stat.st_mode)
             and stat.st_size <= MAX_EXTRACT_FILE_SIZE and should_extract):
         extraction_limit = min(max_content, content_budget[0])
         if full_pdf_ocr:
@@ -576,6 +582,7 @@ def entry_for(path: Path, root: Path, is_dir: bool, ocr_images: bool,
         "tags": merged_tags(path, is_dir) if read_tags else [],
         "modified": iso_time(stat.st_mtime) if stat else "",
         "size": 0 if is_dir or not stat else int(stat.st_size),
+        "nonRegular": bool(not is_dir and stat and not stat_module.S_ISREG(stat.st_mode)),
         "content": content,
         "extractor": extractor,
         "extractorVersion": EXTRACTOR_VERSION,
@@ -607,11 +614,11 @@ def scan_root(root: Path, ocr_images: bool, max_content: int,
     root_item = entry_for(root, root, True, ocr_images, max_content,
                           previous.get(str(root), {}), stats,
                           content_budget, ocr_pdf_pages, read_tags)
-    items: List[Dict] = [root_item]
     if journal:
         journal.record(root_item)
     state["items"] += 1
     progress[0] += 1
+    yield root_item
     def walk_error(error):
         errors.append({"path": str(error.filename or root), "error": str(error), "phase": "directory-read"})
     for current, directories, files in os.walk(str(root), followlinks=False, onerror=walk_error):
@@ -634,12 +641,13 @@ def scan_root(root: Path, ocr_images: bool, max_content: int,
                 item = entry_for(path, root, True, ocr_images, max_content,
                                  previous.get(str(path), {}), stats,
                                  content_budget, ocr_pdf_pages, read_tags)
-                items.append(item)
                 if journal:
                     journal.record(item)
                 state["items"] += 1
                 progress[0] += 1
+                yield item
             except Exception as error:  # isolate unreadable or malformed entries
+                if isinstance(error,InterruptedError):raise
                 errors.append({"path": str(path), "error": str(error)[:300]})
         for name in sorted(files):
             if max_items > 0 and state["items"] >= max_items:
@@ -656,17 +664,18 @@ def scan_root(root: Path, ocr_images: bool, max_content: int,
                 item = entry_for(path, root, False, ocr_images, max_content,
                                  previous.get(str(path), {}), stats,
                                  content_budget, ocr_pdf_pages, read_tags)
-                items.append(item)
                 if journal:
                     journal.record(item)
                 state["items"] += 1
                 progress[0] += 1
+                yield item
             except Exception as error:
+                if isinstance(error,InterruptedError):raise
                 errors.append({"path": str(path), "error": str(error)[:300]})
             if progress[0] % 25 == 0:
                 print(json.dumps({"progress": progress[0], "total": total_items,
                                   "path": str(path)}, ensure_ascii=False), flush=True)
-    return items
+    return
 
 
 def compact_item_for_storage(item: Dict) -> Dict:
@@ -704,7 +713,7 @@ def compact_item_for_storage(item: Dict) -> Dict:
 def compact_payload_for_storage(payload: Dict) -> Dict:
     stored = dict(payload)
     items = payload.get("items", [])
-    if isinstance(items, list):
+    if isinstance(items, (list,RecordList)):
         stored["items"] = [compact_item_for_storage(item)
                            if isinstance(item, dict) else item
                            for item in items]
@@ -712,12 +721,20 @@ def compact_payload_for_storage(payload: Dict) -> Dict:
 
 
 def atomic_json_write(output: Path, payload: Dict) -> None:
+    payload["generation"] = uuid.uuid4().hex
     output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=output.name + ".", dir=str(output.parent))
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(compact_payload_for_storage(payload), handle,
-                      ensure_ascii=False, separators=(",", ":"))
+            metadata = {"generation":payload["generation"]}
+            metadata.update({key:value for key,value in payload.items() if key not in ("items","generation")})
+            header = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+            handle.write(header[:-1] + ',"items":[')
+            for index, item in enumerate(payload.get("items", [])):
+                if index:
+                    handle.write(',')
+                json.dump(compact_item_for_storage(item), handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write(']}')
             handle.flush()
             os.fsync(handle.fileno())
         if output.is_file():
@@ -773,16 +790,16 @@ def atomic_ui_stream_write(output: Path, payload: Dict) -> Path:
                 items = metadata.pop("items", [])
                 metadata["uiStreamVersion"] = 1
                 metadata["uiStreamItems"] = (
-                    len(items) if isinstance(items, list) else 0)
+                    len(items) if isinstance(items, (list,RecordList)) else 0)
                 encoded_meta = json.dumps(
                     metadata, ensure_ascii=False,
                     separators=(",", ":")).encode("utf-8")
                 handle.write(b"UKFIDX1\n")
                 handle.write(struct.pack("<II", 1, len(encoded_meta)))
                 handle.write(encoded_meta)
-                item_count = len(items) if isinstance(items, list) else 0
+                item_count = len(items) if isinstance(items, (list,RecordList)) else 0
                 handle.write(struct.pack("<I", item_count))
-                if isinstance(items, list):
+                if isinstance(items, (list,RecordList)):
                     for item in items:
                         stored = (compact_item_for_storage(item)
                                   if isinstance(item, dict) else item)
@@ -930,7 +947,8 @@ class ResumeJournal:
     def __init__(self, path: Path, signature: Dict):
         self.path = path
         self.signature = signature
-        self.entries: Dict[str, Dict] = {}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.entries = ReuseMap(directory=str(path.parent))
         self.handle = None
         valid = False
         try:
@@ -1024,7 +1042,6 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
         arguments = provider.get("arguments", [])
         if not program or not isinstance(arguments, list):
             raise ValueError("command provider requires program and arguments")
-        import tempfile,resource
         def output_limit():resource.setrlimit(resource.RLIMIT_FSIZE,(4*1024*1024,4*1024*1024))
         with tempfile.TemporaryFile() as output,tempfile.TemporaryFile() as errors:
             child=subprocess.Popen([program,*arguments],stdin=subprocess.PIPE,stdout=output,stderr=errors,preexec_fn=output_limit)
@@ -1055,7 +1072,7 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, response_headers, newurl):
                 raise ValueError("Provider redirects are disabled; authorize the final destination explicitly")
-        opener = urllib.request.build_opener(NoRedirect())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         with opener.open(http_request, timeout=timeout) as response:
             payload=response.read(4*1024*1024+1)
             if len(payload)>4*1024*1024:raise ValueError("Provider response exceeds 4 MiB")
@@ -1069,7 +1086,6 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
         method = str(provider.get("method", ""))
         if not service or not object_path or "." not in method:
             raise ValueError("dbus provider requires service, objectPath and method")
-        import tempfile,resource
         def output_limit():resource.setrlimit(resource.RLIMIT_FSIZE,(4*1024*1024,4*1024*1024))
         with tempfile.TemporaryFile() as output,tempfile.TemporaryFile() as errors:
             child=subprocess.Popen(
@@ -1083,9 +1099,8 @@ def run_provider(provider: Dict, roots: List[Path]) -> object:
             if child.returncode != 0:
                 raise RuntimeError(errors.read(300).decode("utf-8", errors="ignore") or "D-Bus Provider failed or exceeded output limit")
             if len(payload)>4*1024*1024:raise ValueError("Provider response exceeds 4 MiB")
-        tuple_value = ast.literal_eval(payload.decode("utf-8").strip())
-        value = tuple_value[0] if isinstance(tuple_value, tuple) and tuple_value else tuple_value
-        return json.loads(value) if isinstance(value, str) else value
+        from gvariant_json import parse
+        return parse(payload)
     raise ValueError("unknown provider type: " + kind)
 
 
@@ -1152,20 +1167,29 @@ def collect_provider_items(config_path: Path, roots: List[Path],
                 except (TypeError, ValueError) as error:
                     errors.append({"path": name, "error": str(error)[:300]})
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError,
-                urllib.error.URLError, json.JSONDecodeError) as error:
+                urllib.error.URLError, json.JSONDecodeError, SyntaxError) as error:
             errors.append({"path": name, "error": str(error)[:300]})
     return result
 
 
 def previous_items(output: Path) -> Dict[str, Dict]:
-    value = read_json(output)
-    if value.get("version") != INDEX_VERSION:
-        return {}
-    items = value.get("items", [])
-    return {str(item.get("path")): item for item in items
-            if isinstance(item, dict)
-            and item.get("source", "filesystem") == "filesystem"
-            and isinstance(item.get("path"), str)}
+    from snapshot_io import records, ReuseMap
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result = ReuseMap(directory=str(output.parent))
+    try:
+        version = None
+        for key, value in records(output):
+            if key == "version":
+                version = value
+            elif key == "item" and value.get("source", "filesystem") == "filesystem" and isinstance(value.get("path"), str):
+                result[value["path"]] = value
+        if version != INDEX_VERSION:
+            result.clear()
+        result.db.commit()
+        return result
+    except (OSError, ValueError):
+        result.close()
+        return ReuseMap(directory=str(output.parent))
 
 
 def checkpoint_items(path: Path) -> Dict[str, Dict]:
@@ -1176,7 +1200,8 @@ def checkpoint_items(path: Path) -> Dict[str, Dict]:
     pipeline retain OCR work completed by releases that coupled OCR to full
     rebuilds, without mutating or deleting the legacy checkpoint.
     """
-    result: Dict[str, Dict] = {}
+    path.parent.mkdir(parents=True,exist_ok=True)
+    result = ReuseMap(directory=str(path.parent))
     try:
         with path.open("r", encoding="utf-8") as source:
             for line in source:
@@ -1221,13 +1246,15 @@ def run_pending_ocr(output: Path, resume_state: str, max_content: int,
     Completed files are appended to a separate journal so Pause never damages
     the searchable fast index and a later OCR click resumes completed work.
     """
-    payload = read_json(output)
-    raw_items = payload.get("items", [])
-    if payload.get("version") != INDEX_VERSION or not isinstance(raw_items, list):
+    payload={};items=RecordList(directory=str(output.parent))
+    for key,value in records(output):
+        if key=='item':items.append(value)
+        else:payload[key]=value
+    if payload.get("version") != INDEX_VERSION:
         print(json.dumps({"error": "missing-fast-index"}), flush=True)
         return 2
-    items = [item for item in raw_items if isinstance(item, dict)]
-    pending = [item for item in items if item_ocr_state(item)[0] == "pending"]
+    pending=RecordList(directory=str(output.parent))
+    pending.extend(item for item in items if item_ocr_state(item)[0]=="pending")
     print(json.dumps({"phase": "counting", "task": "ocr"},
                      ensure_ascii=False), flush=True)
     print(json.dumps({"total": len(pending), "progress": 0,
@@ -1246,7 +1273,7 @@ def run_pending_ocr(output: Path, resume_state: str, max_content: int,
 
     existing_chars = sum(len(str(item.get("content", ""))) for item in items)
     content_budget = max(0, max_total_content - existing_chars)
-    updates: Dict[str, Dict] = {}
+    updates = ReuseMap(directory=str(output.parent))
     errors = payload.get("errors", [])
     if not isinstance(errors, list):
         errors = []
@@ -1339,12 +1366,11 @@ def run_pending_ocr(output: Path, resume_state: str, max_content: int,
                               "reused": reused, "task": "ocr"},
                              ensure_ascii=False), flush=True)
 
-    ocr_candidates = [item for item in updates.values()
-                      if item_ocr_state(item)[0] == "pending"]
+    ocr_candidates=RecordList(directory=str(output.parent))
+    ocr_candidates.extend(item for item in updates.values() if item_ocr_state(item)[0]=="pending")
     # Small files first: users see useful progress immediately and one
     # several-hundred-page scan cannot pin the counter at 1 for an hour.
-    ocr_candidates.sort(key=lambda item: (
-        int(item.get("size", 0)), str(item.get("path", "")).casefold()))
+    ocr_candidates.sort_by_size()
     ocr_total = resume_ocr_completed + len(ocr_candidates)
     print(json.dumps({"phase": "ocr-running",
                       "progress": resume_ocr_completed,
@@ -1414,6 +1440,7 @@ def run_pending_ocr(output: Path, resume_state: str, max_content: int,
             state, reason = item_ocr_state(item)
             item["ocrStatus"] = state
             item["ocrReason"] = reason
+            items[index] = item
 
     remaining = sum(1 for item in items if item_ocr_state(item)[0] == "pending")
     payload["items"] = items
@@ -1508,7 +1535,8 @@ def main() -> int:
         return run_pending_ocr(output, args.resume_state, max_content,
                                max_total_content, process_nice, io_priority)
     errors: List[Dict] = []
-    items: List[Dict] = []
+    output.parent.mkdir(parents=True,exist_ok=True)
+    items = RecordList(directory=str(output.parent))
     progress = [0]
     stats = {"reused": 0, "extracted": 0, "deleted": 0,
              "contentChars": 0, "truncated": 0}
@@ -1559,8 +1587,7 @@ def main() -> int:
                 print(json.dumps({"resuming": len(checkpoint)},
                                  ensure_ascii=False), flush=True)
     print(json.dumps({"phase": "counting"}, ensure_ascii=False), flush=True)
-    total_items = count_candidates(roots, max_items, excluded_roots,
-                                   included_extensions)
+    total_items = 0  # Unknown until the single directory walk completes.
     print(json.dumps({"total": total_items, "progress": 0},
                      ensure_ascii=False), flush=True)
     state = {"items": 0, "truncated": 0}
@@ -1570,6 +1597,7 @@ def main() -> int:
                                state, max_items, content_budget,
                                ocr_pdf_pages, read_tags, total_items, journal,
                                excluded_roots, included_extensions))
+    total_items=state["items"]
     print(json.dumps({"progress": state["items"], "total": total_items,
                       "path": str(items[-1].get("path", "")) if items else ""},
                      ensure_ascii=False), flush=True)
@@ -1587,25 +1615,29 @@ def main() -> int:
         # The widget's tag feature is intentionally removed.  Also discard
         # legacy/provider tag fields so a no-tag snapshot cannot reintroduce
         # them indirectly.
-        for item in items:
+        for index,item in enumerate(items):
             item["tags"] = []
+            items[index]=item
     stats["ocrPending"] = sum(
         1 for item in items if isinstance(item, dict)
         and item_ocr_state(item)[0] == "pending")
     # A local filesystem record is authoritative when a provider returns the
     # same path.  Providers still contribute virtual/external paths.
-    deduplicated: Dict[str, Dict] = {}
+    deduplicated = ReuseMap(directory=str(output.parent))
     for item in items:
         key = str(item.get("path", ""))
         if key and (key not in deduplicated or item.get("source") == "filesystem"):
             deduplicated[key] = item
-    items = list(deduplicated.values())
+    compacted=RecordList(directory=str(output.parent))
+    compacted.extend(deduplicated.values())
+    items.close();items=compacted
+    deduplicated.close()
     if max_items > 0 and len(items) > max_items:
-        items = items[:max_items]
+        items.truncate(max_items)
         stats["truncated"] = 1
     current_paths = {str(item.get("path")) for item in items
                      if item.get("source") == "filesystem"}
-    stats["deleted"] = len(set(previous) - current_paths)
+    stats["deleted"] = sum(path not in current_paths for path in previous)
 
     tags = (sorted({tag for item in items for tag in item.get("tags", [])},
                    key=str.casefold) if read_tags else [])
@@ -1630,7 +1662,7 @@ def main() -> int:
             "pdfOcr": bool(shutil.which("pdftoppm") and shutil.which("tesseract")),
             "imageOcr": bool(shutil.which("tesseract")),
             "ooxml": True,
-            "legacyOffice": bool(shutil.which("strings")),
+            "legacyOffice": True,
             "providers": True,
             "maxItems": max_items,
             "maxContentPerFile": max_content,
@@ -1652,4 +1684,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:raise SystemExit(main())
+    except Exception as error:
+        print(json.dumps(dict(done=True,error=str(error) or type(error).__name__,errorType=type(error).__name__),ensure_ascii=False),flush=True)
+        raise SystemExit(1)

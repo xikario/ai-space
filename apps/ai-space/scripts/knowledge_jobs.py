@@ -4,8 +4,6 @@ import argparse
 import contextlib
 import fcntl
 import json
-import gzip
-import struct
 import resource
 from ocr_budget import available_memory,ResourcePressureError
 import os
@@ -15,7 +13,7 @@ import subprocess
 import sys
 import time
 import tempfile
-from knowledge_library import storage_plan,guard_storage,GIB,emit,registry_write,manifest,open_readonly,stats,document_ids,ignored_ids
+from knowledge_library import storage_plan,guard_storage,emit,registry_write,manifest,open_readonly,stats,document_ids,ignored_ids
 
 
 def main():
@@ -40,20 +38,31 @@ def main():
     parser.add_argument('--max-gib',type=float,default=32)
     parser.add_argument('--ocr-cpu',type=int,default=25)
     parser.add_argument('--ocr-memory',type=int,default=1024)
+    parser.add_argument('--ocr-languages',default=os.environ.get('AI_SPACE_OCR_LANGUAGES','chi_sim+eng'))
     args=parser.parse_args()
     process=None
     temp_session=None
     try:
+        os.environ['AI_SPACE_OCR_LANGUAGES']=args.ocr_languages
+        from ocr_environment import languages
+        languages()
         directory=Path(args.directory).expanduser().resolve()
         if args.retry_db and not args.retry_documents_json:raise ValueError('--retry-db requires a selected-document retry')
         storage_plan(directory,0,args.reserve_gib,args.max_gib)
         roots=json.loads(args.roots_json)
         if not args.retry_documents_json and (not isinstance(roots,list) or not roots or any(not isinstance(p,str) or not Path(p).is_dir() for p in roots)):
             raise ValueError('Select existing source folders before building')
+        if not isinstance(roots,list) or any(not isinstance(p,str) for p in roots):raise ValueError('资料目录必须是路径列表')
         if any(Path(p).resolve()==directory or directory in Path(p).resolve().parents for p in roots):
             raise ValueError('Choose a dedicated knowledge directory that does not contain your source folders')
         # Prevent recursive self-indexing and accidentally pruning a shared pack.
-        excludes=json.loads(args.exclude_roots_json)+[str(directory)]
+        excluded = json.loads(args.exclude_roots_json)
+        extensions = json.loads(args.include_extensions_json)
+        if not isinstance(excluded,list) or any(not isinstance(p,str) for p in excluded):
+            raise ValueError('排除目录必须是路径列表')
+        if not isinstance(extensions,list) or any(not isinstance(p,str) for p in extensions):
+            raise ValueError('文件类型必须是扩展名列表')
+        excludes=excluded+[str(directory)]
         directory.mkdir(parents=True,exist_ok=True)
         lock=open(str(directory/'.pipeline.lock'),'a')
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -74,11 +83,15 @@ def main():
         signal.signal(signal.SIGTERM,paused)
         try:os.nice(15)
         except OSError:pass
+        import shutil
+        if shutil.which("ionice"):
+            subprocess.run(["ionice","-c","3","-p",str(os.getpid())],
+                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
         def run(stage,command):
             nonlocal process
             emit(task='pipeline',stage=stage,phase='start')
             storage_plan(directory,0,args.reserve_gib,args.max_gib)
-            memory=max(256,min(8192,args.ocr_memory))*1024**2
+            memory=max(512,min(8192,args.ocr_memory))*1024**2
             free=available_memory()
             if free is not None and free<memory+256*1024**2:
                 raise ResourcePressureError('系统可用内存不足，建库已暂停并保留进度；可降低工作进程预算或稍后继续')
@@ -89,7 +102,7 @@ def main():
                 # Catalogs, temporary OCR outputs and SQLite WAL share this
                 # volume; reserve is checked even during a long document.
                 storage_plan(directory,0,args.reserve_gib,args.max_gib)
-                time.sleep(.2)
+                time.sleep(1.0)
             if process.returncode:raise RuntimeError('%s failed (exit %s); completed data retained'%(stage,process.returncode))
             process=None
             state=dict(stage=stage,completed_at=time.strftime('%Y-%m-%dT%H:%M:%S'))
@@ -102,10 +115,13 @@ def main():
                     with contextlib.closing(open_readonly(previous)) as old:
                         identity=manifest(old,previous)
                     stat=previous.stat()
-                    row=dict(identity,path=str(previous),bytes=stat.st_size,mtime_ns=stat.st_mtime_ns,read_only=True,sha256='')
+                    row=dict(identity,path=str(previous),bytes=stat.st_size,mtime_ns=stat.st_mtime_ns,read_only=True,sha256=None)
                     with registry_write() as libraries:
                         if not any(r['path']==str(previous) for r in libraries['libraries']):libraries['libraries'].append(row)
         if args.retry_documents_json:
+            if args.ocr:
+                from ocr_environment import preflight
+                preflight()
             selected=document_ids(args.retry_documents_json)
             with contextlib.closing(open_readonly(database)) as source:
                 if manifest(source,database).get('format')!='legacy-sqlite':raise ValueError('AIKB libraries are read-only; retry on the source machine')
@@ -152,14 +168,19 @@ def main():
         preserve_previous()
         emit(task='pipeline',stage='text',phase='ready',db=str(database))
         if args.ocr or args.ocr_only:
+            from ocr_environment import preflight
+            preflight()
             if not database.exists():raise ValueError('Run manifest and text stages before OCR')
             run('ocr',[scripts/'smart_space_knowledge.py','build','--index-json',index,
                 '--index-stream',index_stream,'--db',database,'--ocr','--ocr-only','--chunk-size',args.chunk_size,'--overlap',args.overlap])
         summary=stats(database)
         emit(done=True,task='pipeline',phase='complete',ocr=args.ocr or args.ocr_only,db=str(database),documents=summary['documents'],extractionStates=summary['extractionStates'])
         return 0
-    except (OSError,ValueError,RuntimeError,EOFError,struct.error) as exc:
-        emit(done=True,task='pipeline',error=str(exc));return 1
+    except Exception as exc:
+        message = '另一个建库任务正在使用该目录，请先暂停或等待完成' if isinstance(exc, BlockingIOError) else str(exc) or type(exc).__name__
+        emit(done=True, task='pipeline', error=message, errorType=type(exc).__name__,
+             paused=isinstance(exc, InterruptedError))
+        return 1
     finally:
         if process and process.poll() is None:
             process.terminate()

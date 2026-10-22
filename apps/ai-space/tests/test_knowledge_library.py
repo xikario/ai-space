@@ -185,7 +185,7 @@ class KnowledgeLibraryTest(unittest.TestCase):
     def test_optional_ocr_runs_only_after_text_and_records_state(self):
         image=self.doc.parent/'扫描.png';image.write_bytes(b'\x89PNG\r\n\x1a\n')
         tools=self.root/'tools';tools.mkdir();fake=tools/'tesseract'
-        fake.write_text('#!'+sys.executable+'\nprint("银行扫描 OCR 正文")\n');fake.chmod(0o755)
+        fake.write_text('#!'+sys.executable+'\nimport sys\nprint("chi_sim\\neng" if "--list-langs" in sys.argv else "银行扫描 OCR 正文")\n');fake.chmod(0o755)
         with mock.patch.dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH']):
             result=self.run_script('knowledge_jobs.py','--directory',self.root/'managed','--roots-json',json.dumps([str(self.doc.parent)]),'--ocr','--reserve-gib','.01')
         self.assertEqual([r['stage'] for r in result if r.get('task')=='pipeline' and r.get('phase')=='start'],['manifest','text','ocr'])
@@ -228,12 +228,16 @@ class KnowledgeLibraryTest(unittest.TestCase):
         value=lib.fetch(self.db,hit['document_id'],hit['chunk_id'])
         self.assertEqual(value['results'],[]);self.assertEqual(value['extractionStatus'],'no_text')
 
-    def test_ocr_stage_reads_stream_even_if_legacy_json_is_unreadable(self):
+    def test_mismatched_inventory_stops_without_touching_existing_body(self):
         folder=self.root/'managed';args=['--directory',folder,'--roots-json',json.dumps([str(self.doc.parent)]),'--reserve-gib','.01']
         self.run_script('knowledge_jobs.py',*args)
         (folder/'catalog/index.json').write_text('not valid JSON; stream is authoritative')
-        result=self.run_script('knowledge_jobs.py',*args,'--ocr-only')
-        self.assertTrue(result[-1]['done']);self.assertEqual(result[-1]['documents'],1)
+        db=folder/'smart-space-knowledge.sqlite'
+        before=db.read_bytes()
+        result=subprocess.run([sys.executable,str(SCRIPTS/'knowledge_jobs.py'),*map(str,args),'--ocr-only'],capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertTrue(json.loads(result.stdout.splitlines()[-1])['error'])
+        self.assertEqual(before,db.read_bytes())
 
     def test_explicit_scan_then_text_stage(self):
         folder=self.root/'separate';args=['--directory',folder,'--roots-json',json.dumps([str(self.doc.parent)]),'--reserve-gib','.01']

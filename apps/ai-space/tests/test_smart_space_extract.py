@@ -222,6 +222,8 @@ class DeepKnowledgeTest(unittest.TestCase):
         self.manifest([path]);self.build()
         with sqlite3.connect(self.db) as con:
             con.execute("INSERT INTO chunks_fts(name,path,content,locator,document_id,chunk_id) VALUES('ghost','','ghost','',99999,99999)")
+            # Simulate a pre-integrity-migration database, not a normal atomic build.
+            con.execute("DELETE FROM meta WHERE key='fts_orphans_checked_v1'")
         self.build()
         with sqlite3.connect(self.db) as con:
             self.assertEqual(con.execute('SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.id=f.chunk_id WHERE c.id IS NULL').fetchone()[0],0)

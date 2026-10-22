@@ -1,4 +1,5 @@
 #include "KnowledgeFailuresDialog.h"
+#include "JsonWorkerRequest.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -67,10 +68,7 @@ KnowledgeFailuresDialog::KnowledgeFailuresDialog(const QString &db,const QString
     updateActions();load();
 }
 
-KnowledgeFailuresDialog::~KnowledgeFailuresDialog()
-{
-    if(m_process && m_process->state()!=QProcess::NotRunning){auto *process=m_process.data();process->disconnect(this);process->setParent(qApp);connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),process,&QObject::deleteLater);process->kill();}
-}
+KnowledgeFailuresDialog::~KnowledgeFailuresDialog() = default;
 
 bool KnowledgeFailuresDialog::includeOcr() const {return m_ocr->isChecked();}
 QJsonArray KnowledgeFailuresDialog::selectedIds() const
@@ -115,12 +113,12 @@ void KnowledgeFailuresDialog::changePolicy(bool ignore)
 }
 void KnowledgeFailuresDialog::start(const QStringList &arguments,bool mutation)
 {
-    if(m_busy)return;m_busy=true;setProperty("failureListLoaded",false);setProperty("failureListIgnored",m_filter->currentData().toBool());setProperty("failureListCategory",m_category->currentData().toString());updateActions();m_message->setText(mutation?QStringLiteral("正在保存处理方式…"):QStringLiteral("正在读取失败记录…"));
-    auto *process=new QProcess(this);m_process=process;auto output=std::make_shared<QByteArray>();
-    connect(process,&QProcess::readyReadStandardOutput,this,[process,output]{output->append(process->readAllStandardOutput());if(output->size()>4*1024*1024){output->clear();process->setProperty("oversize",true);process->kill();}});
-    connect(process,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),this,[this,process,output,mutation](int code,QProcess::ExitStatus){
-        output->append(process->readAllStandardOutput());const auto data=QJsonDocument::fromJson(*output).object();m_process=nullptr;m_busy=false;process->deleteLater();
-        if(code!=0 || data.isEmpty() || !data.value("error").toString().isEmpty()){m_allSelected=false;{QSignalBlocker block(m_table);m_table->clearSelection();}m_message->setText(QStringLiteral("操作未完成：%1").arg(data.value("error").toString(QStringLiteral("读取超时或返回格式无效，请刷新重试"))));updateActions();return;}
+    if(m_busy)return;m_busy=true;emit backgroundBusyChanged(true);setProperty("failureListLoaded",false);setProperty("failureListIgnored",m_filter->currentData().toBool());setProperty("failureListCategory",m_category->currentData().toString());updateActions();m_message->setText(mutation?QStringLiteral("正在保存处理方式…"):QStringLiteral("正在读取失败记录…"));
+    QStringList args{QStringLiteral("--db"),m_db};args.append(arguments);
+    m_request=JsonWorkerRequest::run(this,m_worker,args,[this,mutation](const JsonWorkerRequest::Result &result){
+        m_request=nullptr;m_busy=false;emit backgroundBusyChanged(false);
+        const auto data=result.data;
+        if(!result.success){m_allSelected=false;{QSignalBlocker block(m_table);m_table->clearSelection();}m_message->setText(QStringLiteral("操作未完成：%1").arg(result.error));updateActions();return;}
         if(mutation){m_allSelected=false;m_offset=0;m_notice=data.value("ignored").toBool()?QStringLiteral("已忽略 %1 项；已有正文保留。").arg(data.value("changed").toInt()):QStringLiteral("已取消 %1 项忽略，可选择重新处理或等待下一次更新。").arg(data.value("changed").toInt());load();return;}
         const QString token=data.value("selection_token").toString();
         if(m_allSelected && token!=m_selectionToken){m_allSelected=false;m_notice=QStringLiteral("筛选结果已变化，已取消跨页全选；请核对后重新选择。");}
@@ -132,7 +130,5 @@ void KnowledgeFailuresDialog::start(const QStringList &arguments,bool mutation)
         m_detail->clear();m_page->setText(m_total?QStringLiteral("%1–%2 / %3 项").arg(m_offset+1).arg(m_offset+rows.size()).arg(m_total):QStringLiteral("0 项"));
         m_message->setText(!m_writable?QStringLiteral("共享知识库只读；请在资料来源机器处理失败项，再导出新版本。"):!m_notice.isEmpty()?m_notice:m_total?QStringLiteral("可按原因筛选；“全选筛选结果”包括其他页。忽略和重试均保留失败时的旧正文。"):QStringLiteral("当前分类没有记录。"));updateActions();m_table->setFocus();
     });
-    connect(process,&QProcess::errorOccurred,this,[this,process](QProcess::ProcessError error){if(error==QProcess::FailedToStart){m_process=nullptr;m_busy=false;process->deleteLater();m_message->setText(QStringLiteral("无法启动知识库工具，请检查安装"));updateActions();}});
-    QStringList args{m_worker,QStringLiteral("--db"),m_db};args.append(arguments);process->start(QStandardPaths::findExecutable(QStringLiteral("python3")),args);
-    QTimer::singleShot(15000,process,[process]{if(process->state()!=QProcess::NotRunning)process->kill();});
+    connect(m_request,&JsonWorkerRequest::progress,this,[this](const QJsonObject &){m_message->setText(QStringLiteral("正在检查旧版失败记录，请稍候…"));});
 }

@@ -176,7 +176,7 @@ class LegacyPptTest(unittest.TestCase):
         self.assertEqual(build()['updated'],2);self.assertEqual(build()['reused'],2)
         # The PPT revision must not make cached TXT/PDF/DOCX files stale.
         from smart_space_extract import parser_version, EXTRACTOR_VERSION
-        self.assertEqual(parser_version(other),EXTRACTOR_VERSION)
+        self.assertEqual(parser_version(other),EXTRACTOR_VERSION+"+safe-text-2")
         self.assertIn(legacy_ppt.PARSER_VERSION,parser_version(path))
         with contextlib.closing(sqlite3.connect(db)) as conn:
             old_other = conn.execute('SELECT content FROM chunks WHERE document_id=2').fetchall()

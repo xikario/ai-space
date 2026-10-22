@@ -77,22 +77,49 @@ def registry_path():
 
 def registry():
     path = registry_path()
+    empty = dict(version=1, libraries=[])
     if not path.exists():
-        return {'version': 1, 'libraries': []}
-    value = json.loads(path.read_text())
+        return empty
+    if path.stat().st_size > 8*1024*1024:
+        return dict(empty,registry_warnings=['知识库注册表超过读取限制，请修复或恢复备份'],repair_required=True)
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except (ValueError, UnicodeError, RecursionError) as error:
+        return dict(empty, registry_warnings=['注册表内容损坏：'+str(error)], repair_required=True)
     if not isinstance(value,dict) or value.get('version') != 1 or not isinstance(value.get('libraries'), list):
-        raise ValueError('Unsupported library registry')
-    for row in value['libraries']:
-        if (not isinstance(row,dict) or not isinstance(row.get('path'),str) or not row['path']
-                or not isinstance(row.get('library_id'),str) or not isinstance(row.get('version'),str)
-                or not re.fullmatch(r'[A-Za-z0-9._-]{1,80}',row['version'])
-                or type(row.get('bytes')) is not int or row['bytes']<0
-                or type(row.get('mtime_ns')) is not int or row['mtime_ns']<0
-                or not isinstance(row.get('read_only'),bool)):
-            raise ValueError('Invalid library registry entry')
-        try:uuid.UUID(row['library_id'])
-        except ValueError:raise ValueError('Invalid library registry identity')
-    return value
+        return dict(empty, registry_warnings=['注册表结构或版本无法识别'], repair_required=True)
+    valid=[]; warnings=[]
+    for index,row in enumerate(value['libraries']):
+        try:
+            if (not isinstance(row,dict) or not isinstance(row.get('path'),str) or not row['path']
+                    or not isinstance(row.get('library_id'),str) or not isinstance(row.get('version'),str)
+                    or not re.fullmatch(r'[A-Za-z0-9._-]{1,80}',row['version'])
+                    or type(row.get('bytes')) is not int or row['bytes']<0
+                    or type(row.get('mtime_ns')) is not int or row['mtime_ns']<0
+                    or not isinstance(row.get('read_only'),bool)
+                    or ('enabled' in row and not isinstance(row['enabled'],bool))):
+                raise ValueError('字段无效')
+            uuid.UUID(row['library_id'])
+            valid.append(row)
+        except (ValueError,TypeError,AttributeError):
+            warnings.append('第 %d 条记录无效，已暂时跳过' % (index+1))
+    return dict(version=1,libraries=valid,registry_warnings=warnings,repair_required=bool(warnings))
+
+
+def backup_registry(path):
+    backup=path.with_name(path.name+'.recovery-'+uuid.uuid4().hex)
+    with path.open('rb') as source, backup.open('xb') as target:
+        shutil.copyfileobj(source,target,1024*1024)
+        target.flush();os.fsync(target.fileno())
+    os.chmod(backup,0o600)
+    return str(backup)
+
+
+def repair_registry():
+    backup=''
+    with registry_write() as value:
+        backup=value.pop('recovery_backup','')
+    return dict(done=True,task='repair-registry',backup=backup,files_deleted=False)
 
 
 @contextlib.contextmanager
@@ -107,10 +134,14 @@ def registry_write():
             if lock.seek(0,2)==0:lock.write(b'0');lock.flush()
             lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_LOCK,1)
         value = registry()
+        if value.pop('repair_required',False):
+            value['recovery_backup']=backup_registry(path)
+        value.pop('registry_warnings',None)
         yield value
+        value.pop('recovery_backup',None)
         fd, temporary = tempfile.mkstemp(prefix='.libraries-', dir=str(path.parent))
         try:
-            with os.fdopen(fd, 'w') as out:
+            with os.fdopen(fd, 'w', encoding='utf-8') as out:
                 json.dump(value, out, ensure_ascii=False, indent=2)
                 out.flush(); os.fsync(out.fileno())
             os.replace(temporary, path)
@@ -237,6 +268,16 @@ def describe_issue(value):
     if ';' in text:
         return '；'.join(dict.fromkeys(describe_issue(part) for part in text.split(';') if part.strip()))
     lower=text.casefold()
+    if lower.startswith('ocr_languages_missing:'):
+        return '缺少 OCR 语言包：'+text.partition(':')[2]+'；请安装对应 Tesseract 语言包，或在建库向导修改 OCR 语言（简体中文：tesseract-ocr-chi-sim）'
+    if lower=='ocr_language_probe_failed':return '无法读取 OCR 语言包列表，请检查 Tesseract 安装'
+    if lower=='ocr_languages_invalid':return 'OCR 语言配置无效；请使用 chi_sim、eng 等语言代码，并用 + 连接'
+    if 'incorrect password' in lower or 'password required' in lower:return 'PDF 文件已加密或需要密码；请解除加密后重新处理'
+    if lower.startswith('document_text_limit:'):return '正文达到单文档提取上限，已保留上限内的内容；此文件仅部分入库'
+    if lower=='document_input_limit':return '文件达到单文档读取上限，仅提取已读取范围；此文件仅部分入库'
+    if lower=='decode_errors_replaced':return '文件含无法解码的字节，已替换异常字符并保留其余正文'
+    if lower=='rtf:visible_text_only':return 'RTF 仅提取可见文字，未保留排版和嵌入对象'
+    if 'binary content' in lower:return '文件实际包含二进制内容或视频，不能按纯文本提取；请检查文件类型'
     if lower.startswith('unsupported container:'):
         kind=lower.partition(':')[2].strip()
         if kind=='ppt-binary':return '此前的提取器未支持旧版 PowerPoint（.ppt）；请重新处理，尝试提取页面文字'
@@ -315,27 +356,65 @@ def failure_category(status, issues):
     text='; '.join(map(str,issues)).casefold()
     if status=='missing' or 'no such file or directory' in text or '找不到来源文件' in text or 'source missing' in text:return 'missing'
     if 'permission denied' in text or 'permissionerror' in text or '没有读取文件的权限' in text:return 'permissions'
-    if 'not installed' in text or 'no module named' in text or '缺少解析工具' in text:return 'tools'
+    if 'not installed' in text or 'no module named' in text or '缺少解析工具' in text or 'ocr_languages_missing:' in text or 'tesseract not installed' in text:return 'tools'
     if 'timed out' in text or 'timeout' in text or '超时' in text:return 'timeout'
     if any(v in text for v in ('no space left','disk is full','memoryerror','cannot allocate memory','内存不足','空间不足','资源超限','解析限额','时间限额','内存限额')):return 'resources'
     if "codec can't decode" in text or 'unicodedecodeerror' in text or '文字编码' in text:return 'encoding'
-    if re.search(r'\b(?:encrypted|password[- ]protected)\b',text) or '已加密' in text or '需要密码' in text:return 'encrypted'
-    if 'unsupported container:' in text or 'unsupported word fib version' in text or '暂不支持' in text:return 'unsupported'
+    if re.search(r'\b(?:encrypted|password[- ]protected)\b',text) or 'incorrect password' in text or 'password required' in text or '已加密' in text or '需要密码' in text:return 'encrypted'
+    if 'binary content' in text or 'unsupported container:' in text or 'unsupported word fib version' in text or '暂不支持' in text:return 'unsupported'
     if any(v in text for v in ('tesseract failed','pdftoppm failed','pdf page rendering failed','文字识别失败','页面转换失败')):return 'ocr'
     if 'pdftotext failed' in text or '文本提取失败' in text:return 'extraction'
     if any(v in text for v in ('corruption','file is not a zip file','badzipfile','crc','truncated','missing worksheet relationship:','shared string index out of bounds:','word piece table missing','invalid word piece table','not well-formed','mismatched tag','unclosed token','no element found','损坏','结构无效','文件标识无效','不完整','引用无效','引用超出范围','文件边界')):return 'corrupt'
     return 'other'
 
 
+
+
+def _indexed_failure_scope(db,path,ignored,category,offset,limit,collect_all):
+    columns={r[1] for r in db.execute('PRAGMA table_info(extraction_state)')}
+    if 'failure_category' not in columns:return None
+    revision=dict(db.execute("SELECT key,value FROM meta WHERE key IN ('failure_revision','failure_epoch')"))
+    if len(revision)!=2:return None
+    if db.execute("SELECT 1 FROM extraction_state WHERE failure_category='' OR failure_category IS NULL LIMIT 1").fetchone():return None
+    has_policy=db.execute("SELECT 1 FROM sqlite_master WHERE name='ignored_documents'").fetchone()
+    join='LEFT JOIN ignored_documents i ON i.document_id=e.document_id' if has_policy else ''
+    predicate=('i.document_id IS NOT NULL' if ignored else "e.status IN ('failed','missing') AND i.document_id IS NULL") if has_policy else ('0' if ignored else "e.status IN ('failed','missing')")
+    counts={key:0 for key in FAILURE_CATEGORIES}
+    for key,count in db.execute('SELECT e.failure_category,count(*) FROM extraction_state e '+join+' WHERE '+predicate+' GROUP BY e.failure_category'):
+        counts[key if key in counts else 'other']+=count
+        counts['all']+=count
+    total=counts[category]
+    where=predicate+(' AND e.failure_category=?' if category!='all' else '')
+    args=[category] if category!='all' else []
+    fields='d.id,substr(d.name,1,4096),substr(d.path,1,32768),e.status,substr(e.issues_json,1,16384),e.attempted_at,e.source_signature'
+    query=' FROM extraction_state e JOIN documents d ON d.id=e.document_id '+join+' WHERE '+where+' ORDER BY e.document_id'
+    rows=[]
+    for row in db.execute('SELECT '+fields+query+' LIMIT ? OFFSET ?',args+[limit,offset]):
+        try:issues=json.loads(row[4])
+        except (ValueError,TypeError):issues=['无法读取旧失败记录']
+        rows.append((row,issues,failure_category(row[3],issues)))
+    ids=[r[0] for r in db.execute('SELECT e.document_id'+query+('' if collect_all else ' LIMIT 201'),args)]
+    # Every relevant write increments the revision, even replacement by another
+    # ID with the same count/timestamp. The epoch detects a replaced database.
+    token=hashlib.sha256(json.dumps([str(Path(path).resolve()),ignored,category,revision,total],sort_keys=True).encode()).hexdigest()
+    return dict(total=total,rows=rows,ids=ids,selection_token=token,
+        categories=[dict(id=k,label=v,count=counts[k]) for k,v in FAILURE_CATEGORIES.items()])
+
+
 def _failure_scope(db, path, ignored, category, offset=0, limit=50, collect_all=False):
     if category not in FAILURE_CATEGORIES:raise ValueError('未知的失败分类，请刷新列表')
+    fast=_indexed_failure_scope(db,path,ignored,category,offset,limit,collect_all)
+    if fast is not None:return fast
     has_policy=db.execute("SELECT 1 FROM sqlite_master WHERE name='ignored_documents'").fetchone()
     join='LEFT JOIN ignored_documents i ON i.document_id=d.id' if has_policy else ''
     predicate=('i.document_id IS NOT NULL' if ignored else "e.status IN ('failed','missing') AND i.document_id IS NULL") if has_policy else ('0' if ignored else "e.status IN ('failed','missing')")
     sql='SELECT d.id,substr(d.name,1,4096),substr(d.path,1,32768),e.status,substr(e.issues_json,1,16384),e.attempted_at,e.source_signature FROM documents d JOIN extraction_state e ON e.document_id=d.id '+join+' WHERE '+predicate+' ORDER BY d.id'
     counts={key:0 for key in FAILURE_CATEGORIES};rows=[];ids=[];total=0
     digest=hashlib.sha256(json.dumps([str(Path(path).resolve()),ignored,category]).encode())
+    heartbeat=time.monotonic()
     for row in db.execute(sql):
+        if time.monotonic()-heartbeat>1:
+            emit(task='failures',phase='classify-legacy',processed=counts['all']);heartbeat=time.monotonic()
         try:issues=json.loads(row[4])
         except (ValueError,TypeError):issues=['无法读取旧失败记录']
         kind=failure_category(row[3],issues)
@@ -352,6 +431,7 @@ def _failure_scope(db, path, ignored, category, offset=0, limit=50, collect_all=
 def failure_list(path, ignored=False, offset=0, limit=50, category='all'):
     offset=max(0,offset);limit=max(1,min(limit,100))
     with contextlib.closing(open_readonly(path)) as db:
+        db.execute('BEGIN')
         identity=manifest(db,path);scope=_failure_scope(db,path,ignored,category,offset,limit)
         result=[]
         for row,reasons,kind in scope['rows']:
@@ -476,10 +556,18 @@ def search_one(path, query, limit=20, budget_ms=1800, body_only=False):
             # chunks. Provide useful filename hits even for extremely common
             # words whose full-text ranking may exceed the interactive budget.
             predicates=' AND '.join('instr(lower(d.name),?)>0' for _ in segments)
+            title_arguments=[s.casefold() for s in segments]
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='document_names_fts'").fetchone():
+                expression=' AND '.join('"'+' '.join(c for c in segment.casefold() if c.isalnum())+'"' for segment in segments if any(c.isalnum() for c in segment))
+                # Index narrows candidates, then the original substring check
+                # preserves filename matching semantics. Old read-only packages
+                # continue through the deadline-bounded compatibility path.
+                predicates="d.id IN (SELECT rowid FROM document_names_fts WHERE document_names_fts MATCH ?) AND "+predicates
+                title_arguments.insert(0,expression)
             title_sql="""SELECT d.id,substr(d.path,1,32768),substr(d.name,1,4096),substr(d.category,1,128),d.modified_ms,d.size,
                 (SELECT id FROM chunks WHERE document_id=d.id ORDER BY ordinal LIMIT 1),e.status,d.content_hash
                 FROM documents d LEFT JOIN extraction_state e ON e.document_id=d.id WHERE """+predicates+" LIMIT ?"
-            for doc_id,origin,name,category,modified,size,chunk_id,state,digest in ([] if body_only else db.execute(title_sql, [s.casefold() for s in segments]+[limit])):
+            for doc_id,origin,name,category,modified,size,chunk_id,state,digest in ([] if body_only else db.execute(title_sql, title_arguments+[limit])):
                 seen.add(doc_id)
                 identity=document_identity(m,origin,digest)
                 has_body=chunk_id is not None
@@ -577,6 +665,13 @@ def fetch(path, doc_id=None, chunk_id=None, original_path=None, limit=8, offset=
             results=[dict(chunk_id=r[0],ordinal=r[1],locator=r[2],content=r[3],content_truncated=bool(r[4]),reference=reference(m,doc_id,r[0])) for r in selected])
 
 
+def seal_permissions(path,mode=0o444):
+    try:os.chmod(path,mode);return True
+    except OSError as error:
+        if error.errno not in (errno.EPERM,errno.EINVAL,errno.ENOTSUP,errno.EOPNOTSUPP):raise
+        return False  # FAT/exFAT may not expose POSIX permission bits.
+
+
 def publish_no_replace(source, destination):
     # renameat2 also works on common removable filesystems without hard links.
     libc=ctypes.CDLL(None,use_errno=True)
@@ -586,14 +681,53 @@ def publish_no_replace(source, destination):
         if rename(-100,os.fsencode(source),-100,os.fsencode(destination),1)==0:return
         error=ctypes.get_errno()
         if error not in (errno.ENOSYS,errno.EINVAL,errno.ENOTSUP):raise OSError(error,os.strerror(error),str(destination))
-    os.link(source,destination)
-    os.unlink(source)
+    try:
+        os.link(source,destination)
+        os.unlink(source)
+        return
+    except OSError as error:
+        if error.errno not in (errno.EPERM,errno.ENOTSUP,errno.EOPNOTSUPP,errno.EXDEV,errno.ENOSYS):raise
+    # Some removable filesystems support neither no-replace rename nor links.
+    # Copy into a genuinely exclusive descriptor: never replace a placeholder,
+    # which could have been swapped by a concurrent writer. During this fallback
+    # the destination is visibly incomplete and must not be unplugged/imported.
+    descriptor=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    owned=os.fstat(descriptor)
+    try:
+        with os.fdopen(descriptor,'wb') as target, open(source,'rb') as original:
+            copied=0;heartbeat=time.monotonic()
+            for block in iter(lambda:original.read(4*1024*1024),b''):
+                target.write(block);copied+=len(block)
+                if time.monotonic()-heartbeat>1:
+                    emit(task='publish',phase='copy-removable',bytes=copied);heartbeat=time.monotonic()
+            target.flush();os.fsync(target.fileno())
+            try:os.fchmod(target.fileno(),0o444)
+            except OSError:pass
+        current=os.lstat(destination)
+        if (current.st_dev,current.st_ino)!=(owned.st_dev,owned.st_ino):
+            raise FileExistsError('导出目标被其他程序替换，未覆盖该文件')
+        os.unlink(source)
+    except BaseException:
+        try:
+            current=os.lstat(destination)
+            if (current.st_dev,current.st_ino)==(owned.st_dev,owned.st_ino):os.unlink(destination)
+        except FileNotFoundError:pass
+        raise
 
 
 def export_library(source, destination, name, reserve_gib=2, max_gib=32):
+    with contextlib.closing(open_readonly(source)) as check:
+        sealed=manifest(check,source).get('format')!='legacy-sqlite'
+    from smart_space_knowledge import build_lock
+    # The same nonblocking lock excludes all cooperative builders/retry writers.
+    with (contextlib.nullcontext() if sealed else build_lock(source)):
+        return _export_locked(source,destination,name,reserve_gib,max_gib)
+
+
+def _export_locked(source, destination, name, reserve_gib=2, max_gib=32):
     destination=Path(destination).expanduser().absolute()
     if destination.suffix.lower()!='.aikb': raise ValueError('Use the .aikb extension')
-    if destination.exists(): raise FileExistsError('Destination already exists; choose another version filename')
+    if os.path.lexists(destination): raise FileExistsError('Destination already exists; choose another version filename')
     source=Path(source).resolve()
     storage_plan(destination.parent, source.stat().st_size+Path(str(source)+'-wal').stat().st_size if Path(str(source)+'-wal').exists() else source.stat().st_size, reserve_gib,max_gib)
     destination.parent.mkdir(parents=True,exist_ok=True)
@@ -601,7 +735,9 @@ def export_library(source, destination, name, reserve_gib=2, max_gib=32):
     try:
         with contextlib.closing(open_readonly(source)) as src, contextlib.closing(sqlite3.connect(str(temporary))) as dst:
             old=manifest(src,source)
+            deadline=time.monotonic()+max(1,min(3600,float(os.environ.get('AI_SPACE_EXPORT_TIMEOUT_SECONDS','1800'))))
             def progress(status,remaining,total):
+                if time.monotonic()>deadline:raise TimeoutError('导出达到时间上限，未发布不完整文件；请暂停写入任务后重试')
                 guard_storage(temporary,reserve_gib,max_gib)
                 emit(task='export',phase='copy',completedPages=total-remaining,totalPages=total)
             src.backup(dst,pages=2048,progress=progress,sleep=.01)
@@ -617,7 +753,7 @@ def export_library(source, destination, name, reserve_gib=2, max_gib=32):
             dst.commit()
         guard_storage(temporary,reserve_gib,max_gib)
         with temporary.open('rb') as handle:os.fsync(handle.fileno())
-        os.chmod(temporary,0o444)
+        seal_permissions(temporary)
         publish_no_replace(temporary,destination)
         return dict(done=True,task='export',path=str(destination),manifest=value)
     finally:
@@ -632,7 +768,15 @@ def inspect_package(path):
         raise ValueError('AIKB is not sealed; export a consistent snapshot first')
     with contextlib.closing(open_readonly(path)) as db:
         value=manifest(db,path,True)
-        db.set_progress_handler(lambda: 0,10000)
+        heartbeat=time.monotonic()
+        emit(task='import',phase='verify',message='正在检查知识库完整性')
+        def progress():
+            nonlocal heartbeat
+            if time.monotonic()-heartbeat>=1:
+                emit(task='import',phase='verify',message='正在检查知识库完整性')
+                heartbeat=time.monotonic()
+            return 0
+        db.set_progress_handler(progress,10000)
         if db.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise ValueError('Damaged library')
         counts=(db.execute('SELECT count(*) FROM documents').fetchone()[0],db.execute('SELECT count(*) FROM chunks').fetchone()[0])
         if counts!=(value['documents'],value['chunks']):raise ValueError('Manifest counts do not match database')
@@ -668,7 +812,7 @@ def import_library(source,directory,mode='copy',reserve_gib=2,max_gib=32):
                         block=stream.read(4*1024*1024)
                         if not block:break
                         digest.update(block)
-                if digest.hexdigest()!=row.get('sha256'):raise ValueError('Conflicting library identity/version')
+                if row.get('sha256') and digest.hexdigest()!=row['sha256']:raise ValueError('Conflicting library identity/version')
                 return dict(done=True,task='import',duplicate=True,library=enable_version(row['library_id'],row['version']))
     destination=Path(directory).expanduser().absolute()/('%s-%s.aikb'%(value['library_id'],value['version']))
     if mode=='copy' and not destination.exists():storage_plan(directory,source.stat().st_size,reserve_gib,max_gib)
@@ -709,7 +853,7 @@ def import_library(source,directory,mode='copy',reserve_gib=2,max_gib=32):
         if (before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_ino,after.st_size,after.st_mtime_ns):raise ValueError('Source changed during import')
         if mode=='copy':
             if inspect_package(temporary)!=value:raise ValueError('Source manifest changed during import')
-            os.chmod(temporary,0o400);publish_no_replace(temporary,destination);published=True
+            seal_permissions(temporary,0o400);publish_no_replace(temporary,destination);published=True
             active=destination
         else:active=source
         stat=active.stat()
@@ -735,7 +879,10 @@ def import_library(source,directory,mode='copy',reserve_gib=2,max_gib=32):
 
 def selected_paths(db=None,all_libraries=False,include_disabled=False):
     registry_error=None
-    try:known=[r for r in registry()['libraries'] if isinstance(r,dict) and (include_disabled or r.get('enabled',True))]
+    try:
+        catalog=registry()
+        known=[r for r in catalog['libraries'] if isinstance(r,dict) and (include_disabled or r.get('enabled',True))]
+        registry_error='；'.join(catalog.get('registry_warnings',[])) or None
     except (OSError,ValueError,TypeError) as exc:
         known=[];registry_error=str(exc)
     personal=db or configured_db()
@@ -783,6 +930,7 @@ def main(argv=None):
     parser.add_argument('--db',help='Personal library; overrides AI Space configured path')
     commands=parser.add_subparsers(dest='command',required=True)
     commands.add_parser('libraries')
+    commands.add_parser('repair-registry')
     commands.add_parser('stats').add_argument('--details',action='store_true')
     p=commands.add_parser('enable');p.add_argument('--library-id',required=True);p.add_argument('--version',required=True)
     p=commands.add_parser('unmount');p.add_argument('--library-id',required=True);p.add_argument('--version',required=True)
@@ -807,7 +955,8 @@ def main(argv=None):
                 import subprocess
                 subprocess.run(['ionice','-c','3','-p',str(os.getpid())],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
         db=args.db or configured_db()
-        if args.command=='libraries':result=dict(done=True,task='libraries',libraries=selected_paths(args.db,True,True))
+        if args.command=='libraries':result=dict(done=True,task='libraries',libraries=selected_paths(args.db,True,True),registryWarnings=registry().get('registry_warnings',[]))
+        elif args.command=='repair-registry':result=repair_registry()
         elif args.command=='stats':result=stats(db,args.details)
         elif args.command=='failures':result=failure_list(db,args.ignored,args.offset,args.limit,args.category)
         elif args.command=='failure-policy':
@@ -818,7 +967,7 @@ def main(argv=None):
             with registry_write() as catalog:
                 before=len(catalog['libraries'])
                 catalog['libraries']=[r for r in catalog['libraries'] if (r['library_id'],r['version'])!=(args.library_id,args.version)]
-                result=dict(done=True,task='unmount',removed=before-len(catalog['libraries']),files_deleted=False)
+                result=dict(done=True,task='unmount',removed=before-len(catalog['libraries']),files_deleted=False,warning='移除的版本若在使用中，该共享库将暂停检索；请手动启用保留版本。')
         elif args.command=='search':
             result=search_libraries(args.query,args.db,args.all,max(1,min(args.limit,200)),max(10,min(args.budget_ms,30000)),args.body_only)
             if args.compact:
@@ -852,7 +1001,7 @@ def main(argv=None):
         elif args.command=='export':result=export_library(db,args.output,args.name,args.reserve_gib,args.max_gib)
         elif args.command=='import':result=import_library(args.source,args.directory,args.mode,args.reserve_gib,args.max_gib)
         emit(**result);return 1 if result.get('error') else 0
-    except (OSError,ValueError,sqlite3.Error,KeyError,RuntimeError) as exc:
+    except Exception as exc:
         emit(done=True,error=str(exc),task=args.command);return 1
 
 

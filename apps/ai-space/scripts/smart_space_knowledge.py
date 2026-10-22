@@ -147,7 +147,7 @@ def migrate_legacy_schema(db):
         for row in db.execute(
                 """SELECT c.id,d.id,d.name,d.path,c.content,c.locator
                      FROM chunks c JOIN documents d ON d.id=c.document_id
-                    ORDER BY c.id""").fetchall():
+                    ORDER BY c.id"""):
             chunk_id, doc_id, name, path, content, locator = row
             db.execute(
                 """INSERT INTO chunks_fts(
@@ -173,104 +173,119 @@ def open_db(path, read_only=False):
             raise FileNotFoundError("knowledge database does not exist")
         uri = Path(path).as_uri() + "?mode=ro"
         db = sqlite3.connect(uri, uri=True, timeout=30)
-        db.execute("PRAGMA query_only=ON")
-        db.execute("PRAGMA foreign_keys=ON")
-        version = db.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()
-        if version and version[0] == "1":
+        try:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("PRAGMA foreign_keys=ON")
+            version = db.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            if version and version[0] == "1":
+                db.close()
+                raise ValueError("Legacy schema: migrate an explicit copy before querying")
+            validate_schema(db, allow_missing=False)
+            return db
+        except BaseException:
             db.close()
-            raise ValueError("Legacy schema: migrate an explicit copy before querying")
-        validate_schema(db, allow_missing=False)
-        return db
+            raise
     os.makedirs(os.path.dirname(path), exist_ok=True)
     db = sqlite3.connect(path, timeout=30)
-    if db.execute("PRAGMA application_id").fetchone()[0] == 0x41494B42:
-        db.close()
-        raise ValueError("Imported AIKB libraries are read-only; build into a personal library")
-    if os.environ.get("AI_SPACE_MAX_GIB"):
-        page_size = db.execute("PRAGMA page_size").fetchone()[0]
-        db.execute("PRAGMA max_page_count=%d" % int(float(os.environ["AI_SPACE_MAX_GIB"])*1024**3/page_size))
-    db.execute("PRAGMA journal_mode=WAL")
-    secure_db_files(path)
-    db.execute("PRAGMA synchronous=NORMAL")
-    db.execute("PRAGMA foreign_keys=ON")
-    db.execute("PRAGMA temp_store=MEMORY")
-    has_meta = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
-    ).fetchone()
-    if has_meta:
-        version = db.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
+    try:
+        if db.execute("PRAGMA application_id").fetchone()[0] == 0x41494B42:
+            db.close()
+            raise ValueError("Imported AIKB libraries are read-only; build into a personal library")
+        if os.environ.get("AI_SPACE_MAX_GIB"):
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            db.execute("PRAGMA max_page_count=%d" % int(float(os.environ["AI_SPACE_MAX_GIB"])*1024**3/page_size))
+        db.execute("PRAGMA journal_mode=WAL")
+        secure_db_files(path)
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA temp_store=MEMORY")
+        has_meta = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
         ).fetchone()
-        if version and version[0] == "1":
-            migrate_legacy_schema(db)
-        else:
-            validate_schema(db, allow_missing=True)
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY,
-            path TEXT NOT NULL UNIQUE,
-            root TEXT NOT NULL DEFAULT '',
-            name TEXT NOT NULL DEFAULT '',
-            category TEXT NOT NULL DEFAULT '',
-            suffix TEXT NOT NULL DEFAULT '',
-            modified_ms INTEGER NOT NULL DEFAULT 0,
-            size INTEGER NOT NULL DEFAULT 0,
-            content_hash TEXT NOT NULL DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY,
-            document_id INTEGER NOT NULL REFERENCES documents(id)
-                ON DELETE CASCADE,
-            ordinal INTEGER NOT NULL,
-            locator TEXT NOT NULL DEFAULT '',
-            content TEXT NOT NULL,
-            UNIQUE(document_id, ordinal)
-        );
-        CREATE INDEX IF NOT EXISTS chunks_document_idx
-            ON chunks(document_id);
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-            name, path, content,
-            locator UNINDEXED, document_id UNINDEXED, chunk_id UNINDEXED,
-            tokenize='unicode61 remove_diacritics 2'
-        );
-        CREATE TABLE IF NOT EXISTS document_availability (
-            document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
-            status TEXT NOT NULL DEFAULT 'present'
-        );
-        CREATE TABLE IF NOT EXISTS ignored_documents (
-            document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
-            ignored_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS seen_paths (
-            path TEXT PRIMARY KEY
-        );
-        CREATE TABLE IF NOT EXISTS extraction_state (
-            document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
-            source_signature TEXT NOT NULL DEFAULT '',
-            parser_version TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'legacy',
-            issues_json TEXT NOT NULL DEFAULT '[]',
-            source_kind TEXT NOT NULL DEFAULT '',
-            indexed_chars INTEGER NOT NULL DEFAULT 0,
-            extracted_blocks INTEGER NOT NULL DEFAULT 0,
-            attempted_at TEXT NOT NULL DEFAULT ''
-        );
-        """
-    )
-    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
-               (SCHEMA_VERSION,))
-    db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('library_id',?)", (str(uuid.uuid5(uuid.NAMESPACE_URL,str(Path(path).resolve()))),))
-    align_fts_rowids(db)
-    db.commit()
-    secure_db_files(path)
-    return db
+        if has_meta:
+            version = db.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            if version and version[0] == "1":
+                migrate_legacy_schema(db)
+            else:
+                validate_schema(db, allow_missing=True)
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                root TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                suffix TEXT NOT NULL DEFAULT '',
+                modified_ms INTEGER NOT NULL DEFAULT 0,
+                size INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS chunks (
+                id INTEGER PRIMARY KEY,
+                document_id INTEGER NOT NULL REFERENCES documents(id)
+                    ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                locator TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL,
+                UNIQUE(document_id, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS chunks_document_idx
+                ON chunks(document_id);
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                name, path, content,
+                locator UNINDEXED, document_id UNINDEXED, chunk_id UNINDEXED,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            CREATE TABLE IF NOT EXISTS document_availability (
+                document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'present'
+            );
+            CREATE TABLE IF NOT EXISTS ignored_documents (
+                document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                ignored_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS seen_paths (
+                path TEXT PRIMARY KEY
+            );
+            CREATE TABLE IF NOT EXISTS extraction_state (
+                document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                source_signature TEXT NOT NULL DEFAULT '',
+                parser_version TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'legacy',
+                issues_json TEXT NOT NULL DEFAULT '[]',
+                source_kind TEXT NOT NULL DEFAULT '',
+                indexed_chars INTEGER NOT NULL DEFAULT 0,
+                extracted_blocks INTEGER NOT NULL DEFAULT 0,
+                attempted_at TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
+                   (SCHEMA_VERSION,))
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('library_id',?)", (str(uuid.uuid5(uuid.NAMESPACE_URL,str(Path(path).resolve()))),))
+        from failure_store import prepare
+        prepare(db)
+        has_names=db.execute("SELECT 1 FROM sqlite_master WHERE name='document_names_fts'").fetchone()
+        db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS document_names_fts USING fts5(name,document_id UNINDEXED,tokenize='unicode61 remove_diacritics 2')")
+        if not has_names:
+            for ident,name in db.execute('SELECT id,name FROM documents'):
+                db.execute('INSERT INTO document_names_fts(rowid,name,document_id) VALUES(?,?,?)',(ident," ".join(c for c in name.casefold() if c.isalnum()),ident))
+        align_fts_rowids(db)
+        db.commit()
+        secure_db_files(path)
+        return db
+    except BaseException:
+        db.close()
+        raise
 
 
 def align_fts_rowids(db):
@@ -330,6 +345,8 @@ def iter_stream(path):
         metadata = json.loads(read_exact(stream, read_u32(stream))
                               .decode("utf-8", "replace"))
         total = read_u32(stream)
+        if metadata.get('uiStreamItems',total) != total:
+            raise ValueError('Inventory item count does not match metadata')
         for _ in range(total):
             flags = read_exact(stream, 1)[0]
             size = read_i64(stream)
@@ -349,29 +366,22 @@ def iter_stream(path):
                 "ocr_reason": values[7],
                 "generated_at": metadata.get("generatedAt", ""),
             }
+        if stream.read(1):
+            raise ValueError('Unexpected trailing inventory data')
 
 
 def iter_json(path):
-    size = os.path.getsize(path)
-    if size > MAX_LEGACY_JSON_BYTES:
-        raise ValueError(
-            "legacy JSON index is too large (%d MB); use the .ui.bin.gz "
-            "stream index instead" % (size // 1024 // 1024))
-    with open(path, "r", encoding="utf-8") as stream:
-        root = json.load(stream)
-    items = root.get("items", [])
-    total = len(items)
-    for item in items:
-        yield total, {
-            "is_dir": bool(item.get("isDir")),
-            "size": int(item.get("size", 0)),
-            "modified_ms": int(item.get("modifiedMs", 0)),
-            "path": item.get("path", ""),
-            "root": item.get("root", ""),
-            "name": item.get("name", ""),
-            "category": item.get("category", ""),
-            "content": item.get("content", ""),
-            "generated_at": root.get("generatedAt", ""),
+    from snapshot_io import records
+    generated=''
+    for key,item in records(path):
+        if key=='generatedAt':generated=item
+        if key!='item':continue
+        yield 0, {
+            "is_dir": bool(item.get("isDir")), "size":int(item.get("size",0)),
+            "modified_ms":int(item.get("modifiedMs",0)), "path":item.get("path", ""),
+            "root":item.get("root", ""), "name":item.get("name", ""),
+            "category":item.get("category", ""), "content":item.get("content", ""),
+            "generated_at":generated,
         }
 
 
@@ -428,15 +438,18 @@ def split_chunks(content, target, overlap):
     return chunks
 
 
-def source_signature(item, args, ocr=None):
+def source_signature(item, args, ocr=None, source=None):
     try:
-        info = Path(item["path"]).stat()
-        source = (info.st_mtime_ns, info.st_size)
+        if source is None:
+            info = Path(item["path"]).stat()
+            source = (info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns,info.st_size)
     except OSError:
         source = ("snapshot", content_signature(item))
     return hashlib.sha256(json.dumps([
         parser_version(item['path']), source, args.chunk_size, args.overlap,
-        bool(args.ocr if ocr is None else ocr), bool(args.snapshot_only)
+        bool(args.ocr if ocr is None else ocr), bool(args.snapshot_only), "table-ranges-v2",
+        os.environ.get("AI_SPACE_MAX_DOCUMENT_CHARS", "8388608"),
+        os.environ.get("AI_SPACE_OCR_LANGUAGES", "chi_sim+eng") if (args.ocr if ocr is None else ocr) else ""
     ], sort_keys=True).encode()).hexdigest()
 
 
@@ -463,10 +476,11 @@ def chunks_from_blocks(blocks, name, target, overlap):
         if not content.strip():
             continue
         table_row = "工作表:" in locator or "表格" in locator
+        table_boundary = table_row and start and re.sub(r" 行\d+.*$", "", start) != re.sub(r" 行\d+.*$", "", locator)
         page_boundary = start.startswith("第 ") and start.split(" | ")[0] != locator.split(" | ")[0]
         section_boundary = ("章节:" in start or "章节:" in locator) and (
             start.split(" | ")[0] != locator.split(" | ")[0])
-        if pending and (length + len(content) > target or table_row or page_boundary or section_boundary):
+        if pending and (length + len(content) > target or table_boundary or page_boundary or section_boundary):
             yield from pieces()
             pending, length = [], 0
         if not pending:
@@ -474,7 +488,7 @@ def chunks_from_blocks(blocks, name, target, overlap):
         end = locator
         pending.append(content)
         length += len(content) + 1
-        if length >= target or table_row:
+        if length >= target:
             yield from pieces()
             pending, length = [], 0
     if pending:
@@ -508,8 +522,13 @@ def inventory_metadata(stream_path, json_path):
             if len(data)!=length:raise ValueError('Truncated inventory metadata')
             value=json.loads(data)
     else:
-        if Path(json_path).stat().st_size>MAX_LEGACY_JSON_BYTES:raise ValueError('Legacy inventory too large; use the compressed inventory stream')
-        value=json.loads(Path(json_path).read_text())
+        from snapshot_io import metadata
+        value=metadata(json_path)
+    if stream_path and json_path and Path(json_path).is_file():
+        from snapshot_io import metadata
+        canonical=metadata(json_path)
+        if canonical.get('generation') != value.get('generation'):
+            raise ValueError('文件清单与流式索引版本不一致，请重新执行第 1 步扫描；已有知识保留')
     if value.get('errors') or value.get('stats',{}).get('truncated'):
         raise ValueError('Inventory contains read failures or is incomplete; existing knowledge retained')
     return value
@@ -539,15 +558,19 @@ def build_locked(args):
     skipped=ignored_ids(db)
     db.execute("DELETE FROM seen_paths")
     processed = documents = chunks_count = updated = reused = 0
+    previous_failures_skipped = 0
     total = 0
     generated_at = ""
     last_progress = 0.0
     def report_extraction(count):
+        unit = "blocks"
+        if isinstance(count, dict):
+            unit, count = count.get("unit", "blocks"), count.get("value", 0)
         nonlocal last_progress
         now=time.monotonic()
         if now-last_progress<0.25:return
         last_progress=now
-        emit(task="build",phase="extract",processed=processed,total=total,path=path,blocks=count,documents=documents,chunks=chunks_count)
+        emit(task="build",phase="extract",processed=processed,total=total,path=path,documents=documents,chunks=chunks_count,**{unit:count})
     try:
         for total, item in index_items(args.index_stream, args.index_json):
             processed += 1
@@ -569,13 +592,17 @@ def build_locked(args):
             if os.environ.get("AI_SPACE_STORAGE_DIRECTORY"):
                 from knowledge_library import guard_storage
                 guard_storage(args.db, float(os.environ.get("AI_SPACE_RESERVE_GIB", "2")), float(os.environ.get("AI_SPACE_MAX_GIB", "32")))
-            signature = source_signature(item, args)
+            source = None
             try:
                 source_stat = Path(path).stat()
+                source = (source_stat.st_dev,source_stat.st_ino,source_stat.st_mtime_ns,source_stat.st_ctime_ns,source_stat.st_size)
                 item["size"] = source_stat.st_size
                 item["modified_ms"] = source_stat.st_mtime_ns // 1000000
             except OSError:
-                pass
+                source = ("snapshot",content_signature(item))
+            signature = source_signature(item,args,source=source)
+            text_signature = source_signature(item,args,ocr=False,source=source)
+            ocr_signature = source_signature(item,args,ocr=True,source=source)
             if old and old[0] in skipped and old[0] not in retry_ids:
                 reused+=1;documents+=1
                 chunks_count+=db.execute('SELECT count(*) FROM chunks WHERE document_id=?',(old[0],)).fetchone()[0]
@@ -584,17 +611,18 @@ def build_locked(args):
             state = db.execute("SELECT source_signature,status FROM extraction_state WHERE document_id=?",
                                (old[0],)).fetchone() if old else None
             if (getattr(args, "ocr_only", False) and state and state[1] == "complete"
-                    and state[0] == source_signature(item, args, ocr=False)):
+                    and state[0] == text_signature):
                 reused += 1
                 continue
             preserves_ocr = (not args.ocr and state and state[1] in {"complete", "partial", "no_text"}
                 and "." + suffix in (IMAGE_SUFFIXES | {".pdf"})
-                and state[0] == source_signature(item, args, ocr=True))
+                and state[0] == ocr_signature)
             preserves_text = (state and state[1] == "complete" and "."+suffix not in (IMAGE_SUFFIXES | {".pdf"})
-                and state[0] in (source_signature(item,args,ocr=False),source_signature(item,args,ocr=True)))
+                and state[0] in (text_signature,ocr_signature))
             if (not args.force and state and (state[0] == signature or preserves_ocr or preserves_text)
-                    and state[1] not in {"failed", "missing"}):
+                    and (state[1] not in {"failed", "missing"} or state[0] == signature)):
                 reused += 1
+                previous_failures_skipped += int(state[1] in {"failed", "missing"})
                 documents += 1
                 chunks_count += db.execute("SELECT COUNT(*) FROM chunks WHERE document_id=?",
                                            (old[0],)).fetchone()[0]
@@ -611,6 +639,8 @@ def build_locked(args):
                         VALUES(?,?,?,?,?,?,?,?)""", (path, item["root"], item["name"], item["category"],
                         suffix, item["modified_ms"], item["size"], ""))
                     doc_id = cursor.lastrowid
+                db.execute('DELETE FROM document_names_fts WHERE rowid=?',(doc_id,))
+                db.execute('INSERT INTO document_names_fts(rowid,name,document_id) VALUES(?,?,?)',(doc_id," ".join(c for c in item['name'].casefold() if c.isalnum()),doc_id))
                 db.execute("SAVEPOINT extract_document")
                 result = Extraction(path,ocr=args.ocr,progress=report_extraction)
                 count = indexed_chars = 0
@@ -639,7 +669,7 @@ def build_locked(args):
                         cursor = db.execute("INSERT INTO chunks(document_id,ordinal,locator,content) VALUES(?,?,?,?)",
                             (doc_id, count, locator, piece))
                         db.execute("""INSERT INTO chunks_fts(rowid,name,path,content,locator,document_id,chunk_id)
-                            VALUES(?,?,?,?,?,?,?)""", (cursor.lastrowid, fts_text(item["name"]), fts_text(path), fts_text(piece),
+                            VALUES(?,?,?,?,?,?,?)""", (cursor.lastrowid, fts_text(item["name"]), fts_text(path), fts_text(piece.split("\n",1)[1] if piece.startswith("[文档: ") and "\n" in piece else piece),
                             locator, doc_id, cursor.lastrowid))
                         count += 1
                         indexed_chars += len(piece)
@@ -661,8 +691,7 @@ def build_locked(args):
                         db.rollback()
                         raise error  # SQLITE_FULL may already roll back the transaction.
                     from knowledge_library import StorageLimitError
-                    from ocr_budget import ResourcePressureError
-                    if isinstance(error, (StorageLimitError, ResourcePressureError)) or (isinstance(error, sqlite3.Error) and "full" in str(error).lower()):
+                    if isinstance(error, (StorageLimitError, InterruptedError)) or (isinstance(error, sqlite3.Error) and "full" in str(error).lower()):
                         raise
                     result.status = "missing" if isinstance(error, FileNotFoundError) else "failed"
                     result.issues = [(str(error) or type(error).__name__)[:500], "previous_chunks_retained"]
@@ -679,6 +708,8 @@ def build_locked(args):
                     (doc_id, signature, parser_version(path), result.status,
                      json.dumps(result.issues, ensure_ascii=False), result.kind,
                      indexed_chars, result.blocks, time.strftime("%Y-%m-%dT%H:%M:%S")))
+                from failure_store import store_category
+                store_category(db, doc_id, result.status, result.issues)
                 documents += 1
                 chunks_count += count
                 if retry_ids or (args.ocr and "."+suffix in (IMAGE_SUFFIXES | {".pdf"})):
@@ -709,12 +740,16 @@ def build_locked(args):
         removed_ids=stale_ids if getattr(args,"prune_unseen",False) and not args.ocr_only else []
         for doc_id in removed_ids:
             delete_fts_document(db, doc_id)
+            db.execute("DELETE FROM document_names_fts WHERE rowid=?", (doc_id,))
             db.execute("DELETE FROM documents WHERE id=?", (doc_id,))
         # Recover derived rows left by interrupted/older builders. This never
         # deletes document text, only FTS entries without a matching raw chunk.
-        if not retry_ids:db.execute("""DELETE FROM chunks_fts WHERE rowid IN (
+        repair_needed = not db.execute("SELECT 1 FROM meta WHERE key='fts_orphans_checked_v1'").fetchone()
+        if not retry_ids and repair_needed:
+            db.execute("""DELETE FROM chunks_fts WHERE rowid IN (
             SELECT f.rowid FROM chunks_fts f LEFT JOIN chunks c ON c.id=f.chunk_id
             WHERE c.id IS NULL OR c.document_id != f.document_id)""")
+            db.execute("INSERT OR REPLACE INTO meta VALUES('fts_orphans_checked_v1','1')")
         db.execute("DELETE FROM seen_paths")
         if not args.include_root and not retry_ids:
             db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('index_generated_at',?)", (generated_at,))
@@ -733,7 +768,7 @@ def build_locked(args):
         final_docs = documents if retry_ids else db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         final_chunks = chunks_count if retry_ids else db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         emit(done=True, task="build", documents=final_docs, chunks=final_chunks, updated=updated,
-             reused=reused, deleted=len(removed_ids), retainedAbsent=len(stale_ids)-len(removed_ids), extractionStates=states,
+             reused=reused, previousFailuresSkipped=previous_failures_skipped, deleted=len(removed_ids), retainedAbsent=len(stale_ids)-len(removed_ids), extractionStates=states,
              scope="selected-documents" if retry_ids else "selected-roots" if args.include_root else "full-manifest",
              dbBytes=os.path.getsize(args.db))
     finally:
@@ -827,7 +862,7 @@ def main():
     try:
         args.handler(args)
     except Exception as error:
-        emit(done=True, task=args.command, error=str(error)[:500])
+        emit(done=True, task=args.command, error=str(error)[:500],paused=isinstance(error,InterruptedError),errorType=type(error).__name__)
         return 1
     return 0
 

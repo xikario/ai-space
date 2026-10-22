@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Local, structured, streaming extraction shared by previews and knowledge.
 
-No UI character budget is applied here. Callers may stop iteration for a
-preview; the knowledge worker consumes the stream to its end. Partial output
+Previews may stop early. Full extraction has a separate bounded per-document
+text budget (8 Mi characters by default), with explicit partial diagnostics. Partial output
 and unsupported content are explicit, never a claim of perfect fidelity.
 """
-import codecs
 import datetime
-import io
 import hashlib
 import os
 import posixpath
@@ -21,7 +19,8 @@ import zipfile
 from ocr_budget import run_ocr
 from collections import deque
 from pathlib import Path
-from xml.etree import ElementTree as ET
+import xml_safety as ET
+from text_safety import open_regular_binary, text_encoding, text_lines, document_char_limit
 
 VENDOR = Path(__file__).resolve().parent / "_vendor"
 if VENDOR.is_dir() and str(VENDOR) not in sys.path:
@@ -42,10 +41,12 @@ NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 def parser_version(path):
     # Adding this format must not invalidate every cached document in a large
-    # existing library. Failed records with misleading suffixes retry anyway.
+    # existing library. Plain-text safety changes have their own revision.
     if Path(path).suffix.lower() in {'.ppt', '.dps'}:
         from legacy_ppt import PARSER_VERSION
         return EXTRACTOR_VERSION+'+'+PARSER_VERSION
+    if Path(path).suffix.lower() in TEXT_SUFFIXES:
+        return EXTRACTOR_VERSION+"+safe-text-2"
     return EXTRACTOR_VERSION
 
 
@@ -78,8 +79,9 @@ def run_to_file(arguments, output, timeout=120):
 
 def detect_kind(path):
     """OLE takes precedence over an embedded/appended ZIP directory."""
-    with path.open("rb") as stream:
-        magic = stream.read(8)
+    with open_regular_binary(path) as stream:
+        sample = stream.read(65536)
+        magic = sample[:8]
     if magic == OLE_MAGIC:
         import olefile
         with olefile.OleFileIO(str(path)) as ole:
@@ -106,7 +108,8 @@ def detect_kind(path):
     if magic.startswith(b"%PDF-"):
         return "pdf"
     if path.suffix.lower() in TEXT_SUFFIXES:
-        return "text"
+        text_encoding(sample)
+        return "rtf" if sample.startswith(b"{\\rtf") else "text"
     if path.suffix.lower() in IMAGE_SUFFIXES:
         return "image"
     # A misleading OOXML extension must not result in an empty successful ZIP
@@ -118,7 +121,7 @@ class Extraction:
     def __init__(self, path, ocr=False, progress=None):
         self.path = Path(path)
         try:
-            initial=self.path.stat();self.source_revision=(initial.st_size,initial.st_mtime_ns)
+            initial=self.path.stat();self.source_revision=(initial.st_dev,initial.st_ino,initial.st_size,initial.st_mtime_ns,initial.st_ctime_ns)
         except OSError:self.source_revision=None
         self.ocr = ocr
         self.progress = progress
@@ -138,9 +141,19 @@ class Extraction:
         handler = getattr(self, "extract_" + self.kind.replace("-", "_"), None)
         if handler is None:
             raise ValueError("unsupported container: " + self.kind)
+        total_chars = 0
+        maximum = document_char_limit()
         for locator, text in handler():
             text = text.replace("\x00", " ").strip()
             if text:
+                if total_chars + len(text) > maximum:
+                    self.partial("document_text_limit:%d" % maximum)
+                    text = text[:maximum-total_chars]
+                    if text:
+                        self.blocks += 1
+                        yield locator, text
+                    return
+                total_chars += len(text)
                 self.blocks += 1
                 yield locator, text
                 if self.progress and self.blocks % 100 == 0:
@@ -150,7 +163,7 @@ class Extraction:
         with zipfile.ZipFile(str(self.path)) as archive:
             styles = {}
             if "word/styles.xml" in archive.namelist():
-                root = ET.fromstring(archive.read("word/styles.xml"))
+                root = ET.fromstring(ET.member(archive, "word/styles.xml"))
                 for style in root:
                     sid = attr(style, "styleId")
                     for el in style.iter():
@@ -220,15 +233,23 @@ class Extraction:
                         with archive.open("xl/sharedStrings.xml") as stream:
                             idx = 0
                             root = None
+                            batch = []
+                            batch_chars = 0
                             for event, element in ET.iterparse(stream, events=("start", "end")):
                                 if root is None:
                                     root = element
                                 if event == "end" and local(element.tag) == "si":
                                     value = "".join(el.text or "" for el in element.iter()
                                                     if local(el.tag) == "t")
-                                    pool.execute("INSERT INTO s VALUES(?,?)", (idx, value))
+                                    batch.append((idx, value))
+                                    batch_chars += len(value)
+                                    if len(batch) >= 256 or batch_chars >= 65536:
+                                        pool.executemany("INSERT INTO s VALUES(?,?)", batch)
+                                        batch, batch_chars = [], 0
                                     idx += 1
                                     root.remove(element)
+                            if batch:
+                                pool.executemany("INSERT INTO s VALUES(?,?)", batch)
                         pool.commit()
                     sheets, epoch = workbook_sheets(archive)
                     date_styles = workbook_date_styles(archive)
@@ -253,6 +274,10 @@ class Extraction:
                                 # Extension metadata may also have elements named
                                 # row; only direct worksheet rows are cell data.
                                 if local(element.tag) != "row" or parent is not sheet_data:
+                                    # Release worksheet metadata too. Keep cell
+                                    # descendants only while a real data row is open.
+                                    if parent is not None and sheet_data not in stack:
+                                        parent.remove(element)
                                     continue
                                 row_fallback += 1
                                 row_no = element.get("r", str(row_fallback))
@@ -297,7 +322,7 @@ class Extraction:
             order = []
             if "ppt/presentation.xml" in names and "ppt/_rels/presentation.xml.rels" in names:
                 rels = relationships(archive, "ppt/presentation.xml")
-                root = ET.fromstring(archive.read("ppt/presentation.xml"))
+                root = ET.fromstring(ET.member(archive, "ppt/presentation.xml"))
                 for group in children(root, "sldIdLst"):
                     for el in children(group, "sldId"):
                         rid = el.get("{%s}id" % NS_REL, "")
@@ -313,7 +338,7 @@ class Extraction:
                 if member not in names:
                     self.partial("missing_slide:" + member)
                     continue
-                root = ET.fromstring(archive.read(member))
+                root = ET.fromstring(ET.member(archive, member))
                 trees = [el for el in root.iter() if local(el.tag) == "spTree"]
                 title = ""
                 for el in root.iter():
@@ -478,7 +503,8 @@ class Extraction:
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                     timeout=180, check=False)
             if result.returncode:
-                raise RuntimeError("pdftotext failed (%d)" % result.returncode)
+                detail = result.stderr[:300].decode("utf-8", errors="replace").strip()
+                raise RuntimeError("pdftotext failed (%d): %s" % (result.returncode, detail))
             page = 0
             with target.open(encoding="utf-8") as stream:
                 buffer = ""
@@ -507,20 +533,22 @@ class Extraction:
         else:
             self.partial("page_needs_ocr:%d" % page)
         if self.progress:
-            self.progress(page)
+            self.progress(dict(unit="pages", value=page))
 
     def read_ocr_cache(self, page):
         directory=os.environ.get("AI_SPACE_OCR_CACHE_DIR")
         if not directory or os.environ.get("AI_SPACE_OCR_BYPASS_CACHE")=="1":return None
         path=self.ocr_cache_path(page)
-        if path.is_file() and not path.is_symlink() and path.stat().st_size<=2*1024**2:
-            return path.read_text(encoding="utf-8")
+        try:
+            if path.is_file() and not path.is_symlink() and path.stat().st_size<=2*1024**2:
+                return path.read_text(encoding="utf-8")
+        except (OSError,UnicodeError):pass
         return None
 
     def ocr_cache_path(self,page):
         info=self.path.stat()
-        if self.source_revision!=(info.st_size,info.st_mtime_ns):raise RuntimeError("source changed during OCR; cached pages not reused")
-        key=hashlib.sha256((str(self.path.resolve())+"|"+str(self.source_revision)+"|"+str(page)+"|"+EXTRACTOR_VERSION).encode()).hexdigest()
+        if self.source_revision!=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns):raise RuntimeError("source changed during OCR; cached pages not reused")
+        key=hashlib.sha256((str(self.path.resolve())+"|"+str(self.source_revision)+"|"+str(page)+"|"+EXTRACTOR_VERSION+"|"+os.environ.get("AI_SPACE_OCR_LANGUAGES","chi_sim+eng")).encode()).hexdigest()
         return Path(os.environ["AI_SPACE_OCR_CACHE_DIR"])/(key+".txt")
 
     def save_ocr_cache(self,page,text):
@@ -528,21 +556,10 @@ class Extraction:
         if not directory or len(text.encode("utf-8"))>2*1024**2:return
         from knowledge_library import storage_plan
         storage_plan(directory,0,float(os.environ.get("AI_SPACE_RESERVE_GIB","2")),float(os.environ.get("AI_SPACE_MAX_GIB","32")))
-        folder=Path(directory);folder.mkdir(parents=True,exist_ok=True,mode=0o700)
-        # A bounded page cache enables continuation within a long scanned PDF.
-        # It contains user text, lives on the selected storage disk, and never
-        # grows beyond 512 MiB. Oldest cached pages can safely be recomputed.
-        entries=sorted((p for p in folder.glob("*.txt") if re.fullmatch(r"[a-f0-9]{64}\.txt",p.name)),key=lambda p:p.stat().st_mtime_ns)
-        total=sum(p.stat().st_size for p in entries)
-        target=self.ocr_cache_path(page)
-        while entries and total+len(text.encode("utf-8"))>OCR_CACHE_LIMIT_BYTES:
-            old=entries.pop(0);total-=old.stat().st_size;old.unlink()
-        fd,temporary=tempfile.mkstemp(prefix=".page-",dir=str(folder))
-        try:
-            with os.fdopen(fd,"w",encoding="utf-8") as out:out.write(text);out.flush();os.fsync(out.fileno())
-            os.replace(temporary,target)
-        finally:
-            if os.path.exists(temporary):os.unlink(temporary)
+        from ocr_cache import save
+        import sqlite3
+        try:save(self.ocr_cache_path(page), text, OCR_CACHE_LIMIT_BYTES)
+        except (OSError,sqlite3.Error):self.partial("ocr_cache_unavailable")
 
     def ocr_page(self,page,tmp):
         cached=self.read_ocr_cache(page)
@@ -563,7 +580,8 @@ class Extraction:
                 stdout=subprocess.DEVNULL, timeout=180)
             if result.returncode or not image.exists():
                 raise RuntimeError("PDF page rendering failed: %d" % page)
-            run_to_file(["tesseract", str(image), "stdout", "-l", "chi_sim+eng"], str(value), 120)
+            from ocr_environment import command
+            run_to_file(command(image), str(value), 120)
             return value.read_text(encoding="utf-8")
         finally:
             if image.exists():
@@ -581,22 +599,26 @@ class Extraction:
             return
         with tempfile.TemporaryDirectory(prefix="smart-space-image-") as tmp:
             text = Path(tmp) / "ocr.txt"
-            run_to_file(["tesseract", str(self.path), "stdout", "-l", "chi_sim+eng"], str(text), 120)
+            from ocr_environment import command
+            run_to_file(command(self.path), str(text), 120)
             value=text.read_text(encoding="utf-8")
             self.save_ocr_cache("image",value)
             yield "图片全文（OCR）", value
 
+    def extract_rtf(self):
+        from rtf_text import visible_text
+        maximum = max(65536, document_char_limit() * 4)
+        with open_regular_binary(self.path) as source:
+            value = source.read(maximum + 1)
+        self.partial('rtf:visible_text_only')
+        if len(value) > maximum:
+            self.partial('document_input_limit')
+            value = value[:maximum]
+        text = visible_text(value)
+        for start in range(0, len(text), 65536):
+            yield 'RTF 正文', text[start:start + 65536]
+
     def extract_text(self):
-        with self.path.open("rb") as raw:
-            prefix = raw.read(65536)
-        if prefix.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-            encoding = "utf-16"
-        else:
-            try:
-                codecs.getincrementaldecoder("utf-8-sig")().decode(prefix, final=False)
-                encoding = "utf-8-sig"
-            except UnicodeError:
-                encoding = "gb18030"
         summary = self.path.suffix.lower() == ".log" and self.path.stat().st_size > LOG_SUMMARY_THRESHOLD
         if summary:
             self.partial("large_log_summary:head_errors_context_tail")
@@ -604,28 +626,28 @@ class Extraction:
         context = deque(maxlen=3)
         following = 0
         emitted_until = 0
-        with self.path.open(encoding=encoding, errors="strict") as stream:
-            for no, line in enumerate(stream, 1):
-                if not summary:
-                    yield "行 %d" % no, line
-                    continue
-                tail.append((no, line))
-                error = bool(re.search(r"error|fail|warn|exception", line, re.I))
-                if error:
-                    for prev_no, prev_line in context:
-                        if prev_no > emitted_until:
-                            yield "日志行 %d（筛选摘要）" % prev_no, prev_line
-                            emitted_until = prev_no
-                    following = 3
-                if no <= 100 or error or following:
-                    if no > emitted_until:
-                        yield "日志行 %d（筛选摘要）" % no, line
-                        emitted_until = no
-                    following = max(0, following - 1)
-                context.append((no, line))
+        for no, line in text_lines(self.path, lambda: self.partial("decode_errors_replaced"),
+                                   lambda: self.partial("document_input_limit")):
+            if not summary:
+                yield "行 %d" % no, line
+                continue
+            tail.append((no, line))
+            error = bool(re.search(r"error|fail|warn|exception", line, re.I))
+            if error:
+                for prev_no, prev_line in context:
+                    if prev_no > emitted_until:
+                        yield "日志行 %d（筛选摘要）" % prev_no, prev_line
+                        emitted_until = prev_no
+                following = 3
+            if no <= 100 or error or following:
+                if no > emitted_until:
+                    yield "日志行 %d（筛选摘要）" % no, line
+                    emitted_until = no
+                following = max(0, following - 1)
+            context.append((no, line))
         for no, line in tail:
             if no > emitted_until:
-                yield "日志行 %d（尾部摘要）" % no, line
+                yield "日志行 %d（已读范围尾部摘要）" % no, line
 
     def extract_odf(self):
         # Preserve paragraph/table boundaries for existing ODF support. More
@@ -634,13 +656,22 @@ class Extraction:
         with zipfile.ZipFile(str(self.path)) as archive:
             with archive.open("content.xml") as stream:
                 no = 0
-                for event, el in ET.iterparse(stream, events=("end",)):
+                stack = []
+                for event, el in ET.iterparse(stream, events=("start", "end")):
+                    if event == "start":
+                        stack.append(el)
+                        continue
+                    parent = stack[-2] if len(stack) > 1 else None
+                    stack.pop()
                     if local(el.tag) in {"p", "h"}:
                         value = "".join(el.itertext())
                         if value.strip():
                             no += 1
                             yield "ODF 段落 %d" % no, value
-                        el.clear()
+                        if parent is not None:
+                            parent.remove(el)
+                    elif parent is not None and not any(local(ancestor.tag) in {"p", "h"} for ancestor in stack):
+                        parent.remove(el)
 
 
 def word_text(element):
@@ -704,7 +735,7 @@ def drawing_text(element):
 def relationships(archive, member):
     directory, name = posixpath.split(member)
     rel_path = posixpath.join(directory, "_rels", name + ".rels")
-    root = ET.fromstring(archive.read(rel_path))
+    root = ET.fromstring(ET.member(archive, rel_path))
     return {el.get("Id"): posixpath.normpath(posixpath.join(directory, el.get("Target", "")))
             if not el.get("Target", "").startswith("/") else el.get("Target").lstrip("/")
             for el in root if el.get("TargetMode") != "External"}
@@ -715,7 +746,7 @@ def workbook_sheets(archive):
     if "xl/workbook.xml" not in names:
         return [(Path(n).stem, n) for n in sorted(names, key=natural)
                 if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)], False
-    root = ET.fromstring(archive.read("xl/workbook.xml"))
+    root = ET.fromstring(ET.member(archive, "xl/workbook.xml"))
     date1904 = any(local(el.tag) == "workbookPr" and el.get("date1904") in {"1", "true"}
                    for el in root.iter())
     rels = relationships(archive, "xl/workbook.xml")
@@ -732,7 +763,7 @@ def workbook_sheets(archive):
 def workbook_date_styles(archive):
     if "xl/styles.xml" not in archive.namelist():
         return set()
-    root = ET.fromstring(archive.read("xl/styles.xml"))
+    root = ET.fromstring(ET.member(archive, "xl/styles.xml"))
     custom = {int(el.get("numFmtId")): el.get("formatCode", "")
               for el in root.iter() if local(el.tag) == "numFmt"}
     styles = set()

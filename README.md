@@ -78,3 +78,11 @@ cmake --build build -j2
 Python 测试使用临时文档。安装 `xvfb dbus-x11 x11-utils` 后启用真实进程集成测试，覆盖 1 / 1.5 / 2 倍缩放、迁移、单实例、搜索与关闭；不读取真实个人资料。
 
 本项目 GPL-3.0-or-later；来源、原作者和随包依赖许可见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+
+打包（生成文件，不安装到正在使用的桌面）：
+
+```sh
+(cd build && cpack -G DEB)
+```
+
+发布和贡献约定见 [CONTRIBUTING](CONTRIBUTING.md)，变更见 [CHANGELOG](CHANGELOG.md)。

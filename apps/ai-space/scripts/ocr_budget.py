@@ -21,7 +21,7 @@ def available_memory():
 def run_ocr(arguments, stdout=None, timeout=120):
     percent=max(5,min(100,int(os.environ.get('AI_SPACE_OCR_CPU_PERCENT','25'))))
     wall_timeout=max(1,float(timeout))*100.0/percent+5
-    memory=max(256,min(8192,int(os.environ.get('AI_SPACE_OCR_MEMORY_MB','1024'))))*1024**2
+    memory=max(512,min(8192,int(os.environ.get('AI_SPACE_OCR_MEMORY_MB','1024'))))*1024**2
     free=available_memory()
     if free is not None and free<memory+256*1024**2:
         raise ResourcePressureError('系统可用内存不足，OCR 已暂停；已完成内容保留，请关闭高占用程序后继续')
@@ -41,7 +41,7 @@ def run_ocr(arguments, stdout=None, timeout=120):
         child=subprocess.Popen(arguments,stdout=stdout,stderr=errors,env=environment,preexec_fn=limits)
         started=time.monotonic()
         old_handler=signal.getsignal(signal.SIGTERM)
-        def cancel(signum,frame):raise KeyboardInterrupt('OCR task paused')
+        def cancel(signum,frame):raise InterruptedError('OCR task paused; completed documents retained')
         signal.signal(signal.SIGTERM,cancel)
         try:
             while child.poll() is None:

@@ -12,6 +12,11 @@ if(NOT Qt5_FOUND)
     list(PREPEND CMAKE_PREFIX_PATH "${AI_SPACE_QT_SDK_ROOT}/root/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/cmake")
     find_package(Qt5 5.12 REQUIRED COMPONENTS Core Gui Widgets DBus Network)
 endif()
+option(AI_SPACE_SANITIZERS "Enable ASan and UBSan for a separate Debug build" OFF)
+if(AI_SPACE_SANITIZERS)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
 find_package(ZLIB REQUIRED)
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
@@ -27,9 +32,13 @@ add_custom_target(ai-space-runtime ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${APP}/skills ${CMAKE_BINARY_DIR}/share/ai-space/skills)
 add_library(ai-space-core STATIC
     ${APP}/src/Migration.cpp ${APP}/src/SmartSpaceWidget.cpp
+    ${APP}/src/IndexSnapshotLoader.cpp ${APP}/src/PreviewPane.cpp
+    ${APP}/src/SpacePresentation.cpp ${APP}/src/SpacePresentation.h
+    ${APP}/src/WindowCornerFallback.cpp ${APP}/src/WindowCornerFallback.h
     ${APP}/src/KnowledgeManagerDialog.cpp ${APP}/src/KnowledgeManagerDialog.h
     ${APP}/src/KnowledgeFailuresDialog.cpp ${APP}/src/KnowledgeFailuresDialog.h
     ${APP}/src/KnowledgeJobController.cpp ${APP}/src/KnowledgeJobController.h
+    ${APP}/src/JsonWorkerRequest.cpp ${APP}/src/JsonWorkerRequest.h
     ${APP}/src/WindowTitleBarWidget.cpp ${APP}/src/WindowTitleBarWidget.h
     shared/desktop-launch/DesktopLaunchCompat.cpp)
 target_include_directories(ai-space-core PUBLIC ${APP}/src ${CMAKE_BINARY_DIR}/generated)
@@ -40,23 +49,34 @@ add_dependencies(ai-space ai-space-runtime)
 install(TARGETS ai-space RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS ${APP}/scripts/smart_space_indexer.py ${APP}/scripts/smart_space_knowledge.py
     ${APP}/scripts/smart_space_extract.py ${APP}/scripts/legacy_ppt.py ${APP}/scripts/knowledge_library.py
-    ${APP}/scripts/knowledge_jobs.py ${APP}/scripts/ocr_budget.py ${APP}/scripts/provider_policy.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
+    ${APP}/scripts/knowledge_jobs.py ${APP}/scripts/ocr_budget.py ${APP}/scripts/provider_policy.py ${APP}/scripts/text_safety.py ${APP}/scripts/xml_safety.py ${APP}/scripts/ocr_environment.py ${APP}/scripts/gvariant_json.py ${APP}/scripts/failure_store.py ${APP}/scripts/ocr_cache.py ${APP}/scripts/rtf_text.py ${APP}/scripts/snapshot_io.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
 install(DIRECTORY ${APP}/scripts/_vendor/ DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space/_vendor
     PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
 install(FILES ${APP}/packaging/ai-space.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES ${APP}/assets/smart-space-icon.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps RENAME ai-space.png)
 configure_file(${APP}/packaging/install_desktop.cmake.in ${CMAKE_BINARY_DIR}/install_desktop.cmake @ONLY)
 install(SCRIPT ${CMAKE_BINARY_DIR}/install_desktop.cmake)
-install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/ai-space)
+install(FILES LICENSE THIRD_PARTY_NOTICES.md README.md CHANGELOG.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/ai-space)
+install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/ai-space/docs FILES_MATCHING PATTERN "*.md")
 install(DIRECTORY ${APP}/skills/ DESTINATION ${CMAKE_INSTALL_DATADIR}/ai-space/skills
     PATTERN "__pycache__" EXCLUDE)
 install(PROGRAMS ${APP}/scripts/knowledge_library.py DESTINATION ${CMAKE_INSTALL_DATADIR}/ai-space/skills/ai-space-index-query/scripts)
 if(BUILD_TESTING)
+    add_executable(ai-space-worker-protocol-test ${APP}/tests/worker_protocol_test.cpp
+        ${APP}/src/JsonWorkerRequest.cpp ${APP}/src/JsonWorkerRequest.h
+        ${APP}/src/KnowledgeJobController.cpp ${APP}/src/KnowledgeJobController.h)
+    target_include_directories(ai-space-worker-protocol-test PRIVATE ${APP}/src)
+    target_link_libraries(ai-space-worker-protocol-test PRIVATE Qt5::Core)
+    add_test(NAME ai-space-worker-protocol COMMAND ai-space-worker-protocol-test)
+    set_tests_properties(ai-space-worker-protocol PROPERTIES TIMEOUT 30)
     # Extra automation controls exist only in this non-installed test executable.
     add_executable(ai-space-test-driver ${APP}/src/main.cpp ${APP}/src/AiSpaceController.cpp ${APP}/resources.qrc)
     target_compile_definitions(ai-space-test-driver PRIVATE AI_SPACE_TEST_CONTROL)
     target_link_libraries(ai-space-test-driver PRIVATE ai-space-core)
     add_dependencies(ai-space-test-driver ai-space-runtime)
+    add_test(NAME ai-space-review-regressions COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_review_regressions.py -v)
+    set_tests_properties(ai-space-review-regressions PROPERTIES TIMEOUT 120)
+    add_test(NAME ai-space-data-boundaries COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_data_boundaries.py -v)
     add_test(NAME ai-space-provider-policy COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_provider_policy.py -v)
     add_test(NAME ai-space-publication COMMAND ${Python3_EXECUTABLE} ${APP}/tests/publication_test.py ${CMAKE_SOURCE_DIR})
     add_test(NAME ai-space-knowledge-library COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_knowledge_library.py -v)
@@ -111,3 +131,17 @@ if(BUILD_TESTING)
         endforeach()
     endif()
 endif()
+
+# Portable deb output; installation and package creation do not run the app.
+set(CPACK_GENERATOR "DEB")
+set(CPACK_PACKAGE_NAME "ai-space")
+set(CPACK_PACKAGE_VENDOR "AI Space contributors")
+set(CPACK_PACKAGE_CONTACT "AI Space contributors")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Local document and offline knowledge search")
+set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "AI Space contributors")
+set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt5core5a (>= 5.12), libqt5gui5 (>= 5.12), libqt5widgets5 (>= 5.12), libqt5dbus5 (>= 5.12), libqt5network5 (>= 5.12), zlib1g, python3 (>= 3.8), util-linux")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "poppler-utils, tesseract-ocr, tesseract-ocr-chi-sim")
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+include(CPack)

@@ -87,7 +87,7 @@ public:
     void showSettings();
     void setKnowledgeMigrationPending(bool pending);
     void startFastFullIndex();
-    bool indexBusy() const { return m_libraryJobBusy; }
+    bool indexBusy() const { return m_libraryJobBusy || m_dialogJobBusy; }
     void showKnowledgeManager();
     void showKnowledgeStatus();
     void pauseKnowledgeWork(){stopIdleFullIndex();}
@@ -110,6 +110,7 @@ public:
 
 
 signals:
+    void busyChanged();
     void indexLoaded();
     void closeRequested();
     void autoStartChanged(bool enabled);
@@ -271,6 +272,13 @@ private:
     int m_libraryQuotaGiB = 32;
     int m_ocrCpuPercent = 25;
     int m_ocrMemoryMiB = 1024;
+    QString m_ocrLanguages = QStringLiteral("chi_sim+eng");
+    bool m_dialogJobBusy = false;
+    struct KnowledgeUiState {
+        bool managerVisible=false;
+        bool failuresVisible=false;
+        bool migrationPending=false;
+    } m_uiState;
     bool m_libraryJobBusy = false;
     QPointer<QProcess> m_libraryPreviewProcess;
     int m_knowledgeChunkSize = 1200;

@@ -487,9 +487,9 @@ class SmartSpaceIndexerTests(unittest.TestCase):
         self.assertEqual(payload["includedExtensions"], ["pdf"])
         messages = [json.loads(line) for line in completed.stdout.splitlines()
                     if line.startswith("{")]
-        total = next(message["total"] for message in messages
-                     if "total" in message)
-        self.assertEqual(total, len(payload["items"]))
+        totals=[message["total"] for message in messages if "total" in message]
+        self.assertEqual(totals[0],0)  # One walk: total is explicitly unknown initially.
+        self.assertEqual(totals[-1],len(payload["items"]))
 
     def test_malformed_sidecar_isolated(self):
         document = self.root / "safe.txt"
@@ -627,7 +627,7 @@ class SmartSpaceIndexerTests(unittest.TestCase):
         draw.text((40, 60), '中文资料检索测试', fill='black',
                   font=ImageFont.truetype(font_path, 80))
         image.save(self.root / '中文扫描.png')
-        payload, _ = self.run_indexer('--ocr-images')
+        payload, _ = self.run_indexer('--ocr-images',env=dict(os.environ,AI_SPACE_OCR_LANGUAGES='chi_sim'))
         item = next(item for item in payload['items'] if item['name'] == '中文扫描.png')
         self.assertIn('中文资料', item['content'].replace(' ', ''))
         self.assertEqual(item['extractor'], 'tesseract')
