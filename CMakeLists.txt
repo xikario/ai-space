@@ -148,7 +148,7 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Local document and offline knowledge sear
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "AI Space contributors")
 set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt5core5a (>= 5.12), libqt5gui5 (>= 5.12), libqt5widgets5 (>= 5.12), libqt5dbus5 (>= 5.12), libqt5network5 (>= 5.12), zlib1g, python3 (>= 3.8), util-linux")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt5core5a (>= 5.12), libqt5gui5 (>= 5.12), libqt5widgets5 (>= 5.12), libqt5dbus5 (>= 5.12), libqt5network5 (>= 5.12), libx11-6, zlib1g, python3 (>= 3.8), util-linux")
 set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "poppler-utils, tesseract-ocr, tesseract-ocr-chi-sim")
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 include(CPack)

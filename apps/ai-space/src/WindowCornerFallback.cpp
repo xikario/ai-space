@@ -15,7 +15,7 @@ bool hasCompositor()
         return true;
     // Resolve Xlib here so native macros never leak into Qt headers and no
     // extra development SDK is needed by packagers.
-    static QLibrary library(QStringLiteral("X11"));
+    static QLibrary library(QStringLiteral("X11"), 6);
     using Open = void *(*)(const char *);
     using Close = int (*)(void *);
     using Screen = int (*)(void *);
