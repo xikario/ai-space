@@ -30,10 +30,12 @@ def main():
     reporter = Reporter(sys.stdout, sys.stderr)
     for path in sources(root):
         text = path.read_text(encoding="utf-8")
-        ast.parse(text, filename=str(path), feature_version=8)
+        ast.parse(text, filename=str(path))
         try:
             formatted = black.format_file_contents(
-                text, fast=False, mode=black.FileMode(line_length=100)
+                text,
+                fast=False,
+                mode=black.FileMode(line_length=100, target_versions={black.TargetVersion.PY38}),
             )
         except black.NothingChanged:
             formatted = text
@@ -47,7 +49,7 @@ def main():
         # variables and imports; production and developer tools must be clean.
         if path.parent in (app_scripts(root), root / "tools"):
             errors += checkPath(str(path), reporter)
-    print("Python 3.8 syntax, owned-source lint and formatting checked")
+    print("Python syntax, owned-source lint and formatting checked")
     return int(bool(errors))
 
 

@@ -37,6 +37,7 @@ jobs:
       - run: chown -R ci:ci "$GITHUB_WORKSPACE"
       - run: runuser -u ci -- cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - run: runuser -u ci -- cmake --build build -j2
+      - run: runuser -u ci -- python3 -m compileall -q apps/ai-space/scripts tools
       - run: runuser -u ci -- ctest --output-on-failure -j2
         working-directory: build
       - run: runuser -u ci -- cmake --install build --prefix "$PWD/build/staging"

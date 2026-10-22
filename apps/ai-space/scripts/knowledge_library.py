@@ -745,7 +745,7 @@ def failure_list(path, ignored=False, offset=0, limit=50, category="all"):
                     ignored=ignored,
                     failure_category=kind,
                     failure_category_label=FAILURE_CATEGORIES[kind],
-                    **issue_fields(reasons)
+                    **issue_fields(reasons),
                 )
             )
         return dict(
@@ -921,7 +921,7 @@ def stats(path, details=False):
                                 name=name,
                                 path=source,
                                 status=status,
-                                **issue_fields(values, 500)
+                                **issue_fields(values, 500),
                             )
                         )
             result["ocrPending"] = dict(
@@ -1903,7 +1903,7 @@ def main(argv=None):
                             path=r[0],
                             status=r[1],
                             issues=json.loads(r[2]),
-                            **issue_fields(json.loads(r[2]))
+                            **issue_fields(json.loads(r[2])),
                         )
                         for r in rows
                     ],
@@ -1912,7 +1912,7 @@ def main(argv=None):
             result = dict(
                 done=True,
                 task="plan",
-                **storage_plan(args.directory, 0, args.reserve_gib, args.max_gib)
+                **storage_plan(args.directory, 0, args.reserve_gib, args.max_gib),
             )
         elif args.command == "export":
             result = export_library(db, args.output, args.name, args.reserve_gib, args.max_gib)

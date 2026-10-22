@@ -660,7 +660,7 @@ def build_locked(args):
             path=path,
             documents=documents,
             chunks=chunks_count,
-            **{unit: count}
+            **{unit: count},
         )
 
     try:
@@ -1135,7 +1135,7 @@ def issues(args):
                     issues=json.loads(j),
                     extractor=k,
                     indexedChars=n,
-                    **issue_fields(json.loads(j))
+                    **issue_fields(json.loads(j)),
                 )
                 for p, s, j, k, n in rows
             ],
