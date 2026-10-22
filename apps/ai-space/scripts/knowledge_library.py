@@ -857,8 +857,9 @@ def set_ignored(path, ids, ignored):
     )
 
 
-def stats(path, details=False):
+def stats(path, details=False, fast=False):
     with contextlib.closing(open_readonly(path)) as db:
+        db.execute("BEGIN")  # One consistent snapshot while another worker commits.
         m = manifest(db, path)
         result = dict(
             done=True,
@@ -876,8 +877,9 @@ def stats(path, details=False):
             lastBuild=dict(db.execute("SELECT key,value FROM meta")).get("last_build_at", ""),
         )
         if details:
-            skipped = ignored_ids(db)
-            result["ignoredDocuments"] = len(skipped)
+            result["ignoredDocuments"] = db.execute(
+                "SELECT count(*) FROM ignored_documents"
+            ).fetchone()[0]
             result["failurePending"] = 0
             result["retainedAbsent"] = (
                 db.execute(
@@ -897,39 +899,75 @@ def stats(path, details=False):
                 result["checkpoint"] = {}
             pending_docs = pending_pages = pending_images = empty_pages = empty_images = 0
             failures = []
-            for ident, name, source, status, issues, kind in db.execute(
-                "SELECT d.id,d.name,d.path,e.status,e.issues_json,e.source_kind FROM extraction_state e JOIN documents d ON d.id=e.document_id WHERE e.status!='complete'"
+            summary_exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='extraction_summary'"
+            ).fetchone()
+            summary_ready = (
+                bool(summary_exists)
+                and not db.execute(
+                    "SELECT 1 FROM extraction_state e LEFT JOIN extraction_summary s ON s.document_id=e.document_id WHERE s.document_id IS NULL LIMIT 1"
+                ).fetchone()
+            )
+            pending_complete = summary_ready or not fast
+            if summary_ready:
+                row = db.execute(
+                    """SELECT coalesce(sum(CASE WHEN i.document_id IS NULL AND (s.pending_pages>0 OR s.pending_images>0) THEN 1 ELSE 0 END),0),
+                    coalesce(sum(CASE WHEN i.document_id IS NULL THEN s.pending_pages ELSE 0 END),0),
+                    coalesce(sum(CASE WHEN i.document_id IS NULL THEN s.pending_images ELSE 0 END),0),
+                    coalesce(sum(s.empty_pages),0),coalesce(sum(s.empty_images),0)
+                    FROM extraction_summary s LEFT JOIN ignored_documents i ON i.document_id=s.document_id"""
+                ).fetchone()
+                pending_docs, pending_pages, pending_images, empty_pages, empty_images = row
+            elif not fast:
+                skipped = ignored_ids(db)
+                for ident, name, source, status, issues, kind in db.execute(
+                    "SELECT d.id,d.name,d.path,e.status,e.issues_json,e.source_kind FROM extraction_state e JOIN documents d ON d.id=e.document_id WHERE e.status!='complete'"
+                ):
+                    try:
+                        values = json.loads(issues)
+                    except (ValueError, TypeError):
+                        values = []
+                    pages = {str(v) for v in values if str(v).startswith("page_needs_ocr:")}
+                    image = "image_needs_ocr" in values
+                    empty_pages += len(
+                        {str(v) for v in values if str(v).startswith("empty_ocr_page:")}
+                    )
+                    empty_images += int(kind == "image" and status == "no_text")
+                    if (pages or image) and ident not in skipped:
+                        pending_docs += 1
+                        pending_pages += len(pages)
+                        pending_images += int(image)
+            result["failurePending"] = db.execute(
+                "SELECT count(*) FROM extraction_state e WHERE e.status IN ('failed','missing') AND NOT EXISTS(SELECT 1 FROM ignored_documents i WHERE i.document_id=e.document_id)"
+            ).fetchone()[0]
+            for ident, name, source, status, issues in db.execute(
+                "SELECT d.id,d.name,d.path,e.status,e.issues_json FROM extraction_state e JOIN documents d ON d.id=e.document_id WHERE e.status IN ('failed','missing') AND NOT EXISTS(SELECT 1 FROM ignored_documents i WHERE i.document_id=e.document_id) ORDER BY e.document_id LIMIT 20"
             ):
                 try:
                     values = json.loads(issues)
                 except (ValueError, TypeError):
                     values = []
-                pages = {str(v) for v in values if str(v).startswith("page_needs_ocr:")}
-                image = "image_needs_ocr" in values
-                empty_pages += len({str(v) for v in values if str(v).startswith("empty_ocr_page:")})
-                empty_images += int(kind == "image" and status == "no_text")
-                if (pages or image) and ident not in skipped:
-                    pending_docs += 1
-                    pending_pages += len(pages)
-                    pending_images += int(image)
-                if status in ("failed", "missing") and ident not in skipped:
-                    result["failurePending"] += 1
-                    if len(failures) < 20:
-                        failures.append(
-                            dict(
-                                document_id=ident,
-                                name=name,
-                                path=source,
-                                status=status,
-                                **issue_fields(values, 500),
-                            )
-                        )
+                failures.append(
+                    dict(
+                        document_id=ident,
+                        name=name,
+                        path=source,
+                        status=status,
+                        **issue_fields(values, 500),
+                    )
+                )
             result["ocrPending"] = dict(
-                documents=pending_docs,
-                pdfPages=pending_pages,
-                images=pending_images,
-                emptyOcrPages=empty_pages,
-                imagesWithoutText=empty_images,
+                complete=pending_complete,
+                statisticsSource="summary"
+                if summary_ready
+                else "legacy-scan"
+                if not fast
+                else "awaiting-upgrade",
+                documents=pending_docs if pending_complete else None,
+                pdfPages=pending_pages if pending_complete else None,
+                images=pending_images if pending_complete else None,
+                emptyOcrPages=empty_pages if pending_complete else None,
+                imagesWithoutText=empty_images if pending_complete else None,
                 scope="已提取文档中的明确待OCR标记；未检测文件不计入，非完整扫描任务队列",
             )
             result["failures"] = failures
@@ -1725,7 +1763,11 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("libraries")
     commands.add_parser("repair-registry")
-    commands.add_parser("stats").add_argument("--details", action="store_true")
+    statistics = commands.add_parser("stats")
+    statistics.add_argument("--details", action="store_true")
+    statistics.add_argument(
+        "--fast", action="store_true", help="do not scan legacy OCR diagnostics"
+    )
     p = commands.add_parser("enable")
     p.add_argument("--library-id", required=True)
     p.add_argument("--version", required=True)
@@ -1762,6 +1804,13 @@ def main(argv=None):
     p.add_argument("--category", choices=FAILURE_CATEGORIES, default="all")
     p.add_argument("--expected-selection", default="")
     p.add_argument("--expected-count", type=int, default=0)
+    p = commands.add_parser("prune-absent")
+    p.add_argument("--older-than-days", type=int, default=30)
+    p.add_argument("--cutoff", default="")
+    p.add_argument("--selection-token", default="")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--reserve-gib", type=float, default=2)
+    p.add_argument("--max-gib", type=float, default=32)
     for name in ("plan", "import", "export"):
         p = commands.add_parser(name)
         p.add_argument("--directory", required=name != "export")
@@ -1780,7 +1829,7 @@ def main(argv=None):
 
     signal.signal(signal.SIGTERM, cancel)
     try:
-        if args.command in ("import", "export"):
+        if args.command in ("import", "export", "prune-absent"):
             try:
                 os.nice(15)
             except (OSError, AttributeError):
@@ -1804,8 +1853,20 @@ def main(argv=None):
             )
         elif args.command == "repair-registry":
             result = repair_registry()
+        elif args.command == "prune-absent":
+            from knowledge_maintenance import prune_absent
+
+            result = prune_absent(
+                db,
+                args.older_than_days,
+                args.cutoff,
+                args.selection_token,
+                args.apply,
+                args.reserve_gib,
+                args.max_gib,
+            )
         elif args.command == "stats":
-            result = stats(db, args.details)
+            result = stats(db, args.details, args.fast)
         elif args.command == "failures":
             result = failure_list(db, args.ignored, args.offset, args.limit, args.category)
         elif args.command == "failure-policy":

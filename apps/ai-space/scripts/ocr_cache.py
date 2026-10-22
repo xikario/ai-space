@@ -1,5 +1,7 @@
 """Bounded page cache with an indexed size ledger, not a directory scan per page."""
 import contextlib
+import fcntl
+import stat
 import os
 from pathlib import Path
 import re
@@ -10,6 +12,7 @@ import time
 _CACHES = {}
 MAX_PAGES = 20000
 NAME = re.compile(r"[a-f0-9]{64}\.txt")
+TEMP_NAME = re.compile(r"\.page-[a-z0-9_]{8}")
 
 
 class PageCache:
@@ -30,6 +33,8 @@ class PageCache:
         total = count = 0
         with os.scandir(self.folder) as entries:
             for entry in entries:
+                if TEMP_NAME.fullmatch(entry.name):
+                    self.remove_abandoned(entry)
                 if NAME.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
                     info = entry.stat(follow_symlinks=False)
                     self.db.execute(
@@ -41,11 +46,36 @@ class PageCache:
         self.db.execute("INSERT OR REPLACE INTO counters VALUES(1,?,?)", (total, count))
         self.db.commit()
 
+    def remove_abandoned(self, entry):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(entry.path, flags)
+        except OSError:
+            return
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                return
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            current = os.lstat(entry.path)
+            if (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino):
+                os.unlink(entry.path)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
+
     def save(self, target, text, limit):
         data = text.encode("utf-8")
         descriptor, temporary = tempfile.mkstemp(prefix=".page-", dir=str(self.folder))
         try:
-            with os.fdopen(descriptor, "wb") as stream:
+            # Hold the same inode lease until rename/cleanup, including while
+            # waiting for the ledger transaction. Other workers retain it.
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            with os.fdopen(os.dup(descriptor), "wb") as stream:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -82,6 +112,7 @@ class PageCache:
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
+            os.close(descriptor)
 
 
 def save(target, text, limit):

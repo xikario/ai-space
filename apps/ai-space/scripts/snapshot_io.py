@@ -243,7 +243,11 @@ def disposable_owner(directory):
     import fcntl
     import shutil
 
-    root = Path(directory) if directory is not None else Path(tempfile.gettempdir())
+    if directory is None:
+        # Generic /tmp is shared and may contain millions of unrelated entries.
+        # Recovery is limited to the caller's dedicated scratch/cache directory.
+        return Path(tempfile.gettempdir())
+    root = Path(directory)
     key = str(root.resolve())
     if key not in _CLEANED:
         _CLEANED.add(key)
@@ -258,7 +262,7 @@ def disposable_owner(directory):
             try:
                 if marker.is_symlink():
                     continue
-                with marker.open("r+b") as handle:
+                with open_regular_binary(marker) as handle:
                     if handle.read(64) != b"ai-space-disposable-cache-v1":
                         continue
                     try:

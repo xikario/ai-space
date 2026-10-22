@@ -131,6 +131,7 @@ class SmartSpaceWidget : public QWidget
     bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
+    void showAbsentCleanup(const QString &database, QWidget *parent);
     enum ItemRole { PathRole = Qt::UserRole + 1, FolderLevelRole };
 
     int hitResizeEdges(const QPoint &pos) const;

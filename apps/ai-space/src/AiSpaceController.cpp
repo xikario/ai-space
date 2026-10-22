@@ -259,6 +259,17 @@ QString AiSpaceController::status() const
         o.insert("knowledgeWizardStep", m_widget->property("knowledgeWizardStep").toInt());
         o.insert("knowledgeStatusVisible", m_widget->property("knowledgeStatusVisible").toBool());
         o.insert("knowledgeStatusLoaded", m_widget->property("knowledgeStatusLoaded").toBool());
+#ifdef AI_SPACE_TEST_CONTROL
+        if (auto *button =
+                m_widget->findChild<QPushButton *>(QStringLiteral("knowledgePruneAbsent")))
+            o.insert("knowledgePruneEnabled", button->isEnabled());
+        if (auto *prune = m_widget->findChild<QWidget *>(QStringLiteral("knowledgePruneDialog"))) {
+            o.insert("knowledgePruneVisible", prune->isVisible());
+            if (auto *apply =
+                    prune->findChild<QPushButton *>(QStringLiteral("knowledgePruneApplyButton")))
+                o.insert("knowledgePruneReady", apply->isEnabled());
+        }
+#endif
         o.insert("knowledgeFailuresVisible",
                  m_widget->property("knowledgeFailuresVisible").toBool());
         if (auto *failures =

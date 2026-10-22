@@ -45,6 +45,22 @@ def text_encoding(sample):
                 sample[offset + size * n] == 0x47 for n in range(4)
             ):
                 raise ValueError("binary_content:mpeg_transport_stream")
+    # Conservative BOM-less UTF-16 detection: require a strong alternating
+    # NUL pattern and ordinary printable text, not merely a decodable binary.
+    if len(sample) >= 16:
+        pairs = sample[: len(sample) // 2 * 2]
+        zeros = [pairs[offset::2].count(0) / (len(pairs) // 2) for offset in (0, 1)]
+        for encoding, null_side in (("utf-16-le", 1), ("utf-16-be", 0)):
+            if zeros[null_side] < 0.6 or zeros[1 - null_side] > 0.05:
+                continue
+            try:
+                decoded = codecs.getincrementaldecoder(encoding)().decode(sample, final=False)
+            except UnicodeError:
+                continue
+            printable = sum(c.isprintable() or c in "\t\r\n\f" for c in decoded)
+            letters = sum(c.isascii() and c.isalnum() for c in decoded)
+            if decoded and printable / len(decoded) >= 0.98 and letters / len(decoded) >= 0.2:
+                return encoding
     controls = sum(byte < 32 and byte not in (9, 10, 12, 13) for byte in sample)
     if b"\0" in sample or (sample and controls / len(sample) > 0.02):
         raise ValueError("binary_content:non_text_bytes")

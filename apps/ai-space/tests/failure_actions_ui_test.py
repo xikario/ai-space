@@ -363,6 +363,82 @@ with tempfile.TemporaryDirectory(prefix="failure-ui-") as temporary:
         check("新正文" in state()[2], "batch ignore and restore preserve indexed body")
         key("Escape")
         key("Escape")
+        with contextlib.closing(sqlite3.connect(db)) as conn:
+            missing = source / "已移除的旧资料.txt"
+            ident = conn.execute(
+                "INSERT INTO documents(path,name) VALUES(?,?)", (str(missing), missing.name)
+            ).lastrowid
+            chunk = conn.execute(
+                "INSERT INTO chunks(document_id,ordinal,content) VALUES(?,0,'可清理的旧正文')", (ident,)
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO chunks_fts(rowid,document_id,chunk_id,content) VALUES(?,?,?,'可清理的旧正文')",
+                (chunk, ident, chunk),
+            )
+            conn.execute(
+                "INSERT INTO extraction_state(document_id,status) VALUES(?,'complete')", (ident,)
+            )
+            conn.execute(
+                "INSERT INTO document_availability(document_id,status,absent_since) VALUES(?,'unseen','2000-01-01T00:00:00Z')",
+                (ident,),
+            )
+            conn.commit()
+
+        def retained():
+            with contextlib.closing(sqlite3.connect(db)) as conn:
+                return conn.execute(
+                    "SELECT count(*) FROM documents WHERE id=?", (ident,)
+                ).fetchone()[0]
+
+        call("showKnowledgeStatus")
+        wait(
+            lambda: call("status").get("knowledgeStatusVisible")
+            and call("status").get("knowledgeStatusLoaded")
+            and call("status").get("knowledgePruneEnabled"),
+            "status opens with retained absent document",
+        )
+        status_window = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", "^知识库 · 当前状态详情$"], text=True
+        ).splitlines()[-1]
+        subprocess.run(["xdotool", "windowfocus", "--sync", status_window], check=True)
+        key("alt+d")
+        wait(
+            lambda: call("status").get("knowledgePruneVisible"), "age-filtered cleanup dialog opens"
+        )
+        check(retained() == 1, "opening cleanup does not delete knowledge")
+        prune_window = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", "^清理保留的缺失正文"], text=True
+        ).splitlines()[-1]
+        subprocess.run(["xdotool", "windowfocus", "--sync", prune_window], check=True)
+        key("alt+p")
+        wait(
+            lambda: call("status").get("knowledgePruneReady"),
+            "cleanup preview enables explicit confirmation",
+        )
+        check(retained() == 1, "preview keeps knowledge unchanged")
+        key("alt+r")
+        time.sleep(0.15)
+        confirm_window = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", "^确认清理库内正文$"], text=True
+        ).splitlines()[-1]
+        subprocess.run(["xdotool", "windowfocus", "--sync", confirm_window], check=True)
+        key("Return")
+        check(retained() == 1, "confirmation defaults to No")
+        subprocess.run(["xdotool", "windowfocus", "--sync", prune_window], check=True)
+        key("alt+r")
+        time.sleep(0.15)
+        confirm_window = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", "^确认清理库内正文$"], text=True
+        ).splitlines()[-1]
+        subprocess.run(["xdotool", "windowfocus", "--sync", confirm_window], check=True)
+        key("Left")
+        key("Return")
+        wait(lambda: retained() == 0, "confirmed cleanup removes only selected old knowledge")
+        check("新正文" in state()[2], "cleanup preserves other source documents")
+        subprocess.run(["xdotool", "windowfocus", "--sync", prune_window], check=True)
+        key("Escape")
+        wait(lambda: not call("status").get("knowledgePruneVisible"), "cleanup window closes")
+        key("Escape")
         call("quit")
         check(process.wait(timeout=10) == 0, "application exits without remaining failure workers")
     finally:

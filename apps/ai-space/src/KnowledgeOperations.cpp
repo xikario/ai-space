@@ -2,6 +2,7 @@
 #include "KnowledgeManagerDialog.h"
 #include "KnowledgeFailuresDialog.h"
 #include "KnowledgeJobController.h"
+#include "JsonWorkerRequest.h"
 #include "UiMessages.h"
 #include <QPaintEvent>
 #include <QDBusPendingCall>
@@ -242,8 +243,14 @@ void SmartSpaceWidget::showKnowledgeStatus()
     auto *refresh = new QPushButton(QStringLiteral("刷新库统计"));
     auto *failuresButton = new QPushButton(QStringLiteral("处理失败 / 已忽略…"));
     failuresButton->setObjectName("knowledgeManageFailures");
+    auto *cleanupButton = new QPushButton(QStringLiteral("清理保留的缺失正文…"));
+    cleanupButton->setObjectName("knowledgePruneAbsent");
+    cleanupButton->setShortcut(QKeySequence("Alt+D"));
+    cleanupButton->setToolTip(
+        QStringLiteral("按保留天数预览并清理库内正文（Alt+D），不删除原文件"));
     auto *close = new QPushButton(QStringLiteral("关闭"));
     buttons->addWidget(refresh);
+    buttons->addWidget(cleanupButton);
     buttons->addWidget(failuresButton);
     buttons->addStretch();
     buttons->addWidget(close);
@@ -270,6 +277,10 @@ void SmartSpaceWidget::showKnowledgeStatus()
                                   ? QStringLiteral("失败项重试")
                                   : QStringLiteral("扫描 / 库文件操作");
         failuresButton->setEnabled(!busy && !snapshot.value("path").toString().isEmpty());
+        cleanupButton->setEnabled(
+            !busy && !m_dialogJobBusy && snapshot.value("retainedAbsent").toInt() > 0 &&
+            snapshot.value("manifest").toObject().value("format").toString() ==
+                QLatin1String("legacy-sqlite"));
         QStringList lines;
         lines << QStringLiteral("当前情况")
               << QStringLiteral("任务：%1%2")
@@ -328,6 +339,9 @@ void SmartSpaceWidget::showKnowledgeStatus()
                          "待处理失败 / 缺失：%1　已忽略：%2（仍保留真实提取状态与已有正文）")
                          .arg(snapshot.value("failurePending").toInt())
                          .arg(snapshot.value("ignoredDocuments").toInt());
+            lines << QStringLiteral("已不在清单但保留正文：%1 "
+                                    "份；不会自动删除，可使用下方清理入口按保留天数预览。")
+                         .arg(snapshot.value("retainedAbsent").toInt());
             lines << QStringLiteral("最近成功建库：") + snapshot.value("lastBuild").toString();
             const auto pending = snapshot.value("ocrPending").toObject();
             lines << QString() << QStringLiteral("OCR 阶段与剩余工作")
@@ -337,14 +351,20 @@ void SmartSpaceWidget::showKnowledgeStatus()
                                       property("knowledgeRetryOcr").toBool()
                                   ? QStringLiteral("重试任务按需补全")
                                   : QStringLiteral("未运行"));
-            lines << QStringLiteral("已检测且明确待 OCR：%1 份文档（PDF %2 页、图片 %3 张）")
-                         .arg(pending.value("documents").toInt())
-                         .arg(pending.value("pdfPages").toInt())
-                         .arg(pending.value("images").toInt());
-            lines << QStringLiteral("OCR 后仍无文字的 PDF 页：%1；无正文图片：%2 "
-                                    "张（可能本身没有文字，不自动当作待办）")
-                         .arg(pending.value("emptyOcrPages").toInt())
-                         .arg(pending.value("imagesWithoutText").toInt());
+            if (!pending.value("complete").toBool(true)) {
+                lines << QStringLiteral(
+                    "旧库尚无完整的轻量统计索引，待 OCR "
+                    "数量暂未知；下次显式建库会升级统计。为避免争抢资源，此处不扫描全部诊断记录。");
+            } else {
+                lines << QStringLiteral("已检测且明确待 OCR：%1 份文档（PDF %2 页、图片 %3 张）")
+                             .arg(pending.value("documents").toInt())
+                             .arg(pending.value("pdfPages").toInt())
+                             .arg(pending.value("images").toInt());
+                lines << QStringLiteral("OCR 后仍无文字的 PDF 页：%1；无正文图片：%2 "
+                                        "张（可能本身没有文字，不自动当作待办）")
+                             .arg(pending.value("emptyOcrPages").toInt())
+                             .arg(pending.value("imagesWithoutText").toInt());
+            }
             lines << QStringLiteral("这是已提交提取记录中的待处理量，不包含尚未检测的文件；正在处理"
                                     "的文档提交后才会更新。无正文不一定需要 OCR。")
                   << QStringLiteral("剩余总页数 / 预计耗时：尚不能可靠估算，取决于未检测 PDF "
@@ -401,7 +421,7 @@ void SmartSpaceWidget::showKnowledgeStatus()
         if (m_libraryJobBusy && !currentDirectory.isEmpty())
             args << QStringLiteral("--db")
                  << QDir(currentDirectory).filePath(QStringLiteral("smart-space-knowledge.sqlite"));
-        args << QStringLiteral("stats") << QStringLiteral("--details");
+        args << QStringLiteral("stats") << QStringLiteral("--details") << QStringLiteral("--fast");
         process->start(QStandardPaths::findExecutable(QStringLiteral("python3")), args);
         refresh->setEnabled(false);
     };
@@ -468,12 +488,18 @@ void SmartSpaceWidget::showKnowledgeStatus()
     connect(&live, &QTimer::timeout, &dialog, render);
     live.start();
     QTimer polling;
-    polling.setInterval(10000);
+    polling.setInterval(30000);
     connect(&polling, &QTimer::timeout, &dialog, [&] {
         if (m_libraryJobBusy)
             request();
     });
     polling.start();
+    connect(cleanupButton, &QPushButton::clicked, &dialog, [&] {
+        if (!m_libraryJobBusy && !m_dialogJobBusy) {
+            showAbsentCleanup(snapshot.value("path").toString(), &dialog);
+            request();
+        }
+    });
     connect(refresh, &QPushButton::clicked, &dialog, request);
     setProperty("knowledgeStatusVisible", true);
     setProperty("knowledgeStatusLoaded", false);
@@ -783,6 +809,127 @@ void SmartSpaceWidget::startKnowledgeRetry(const QString &db, const QJsonArray &
     startKnowledgeTask(QStringLiteral("pipeline"), args);
 }
 
+void SmartSpaceWidget::showAbsentCleanup(const QString &database, QWidget *parent)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("清理保留的缺失正文 — AI空间"));
+    dialog.setObjectName("knowledgePruneDialog");
+    dialog.resize(660, 450);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *hint = new QLabel(QStringLiteral(
+        "仅清理连续不在清单中超过指定天数的库内正文，不删除原文件。资料盘离线或目录被移除也会标为缺"
+        "失，请先确认不再需要保留。旧记录从首次升级开始计时。建议先导出备份。"));
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+    auto *days = new QSpinBox;
+    days->setObjectName("knowledgePruneDays");
+    days->setRange(1, 3650);
+    days->setValue(30);
+    days->setSuffix(QStringLiteral(" 天"));
+    layout->addWidget(days);
+    auto *details = new QPlainTextEdit;
+    details->setReadOnly(true);
+    details->setObjectName("knowledgePrunePreview");
+    layout->addWidget(details, 1);
+    auto *row = new QHBoxLayout;
+    auto *preview = new QPushButton(QStringLiteral("预览清理范围"));
+    auto *apply = new QPushButton(QStringLiteral("确认清理…"));
+    auto *close = new QPushButton(QStringLiteral("关闭"));
+    preview->setObjectName("knowledgePrunePreviewButton");
+    apply->setObjectName("knowledgePruneApplyButton");
+    preview->setShortcut(QKeySequence("Alt+P"));
+    apply->setShortcut(QKeySequence("Alt+R"));
+    apply->setEnabled(false);
+    row->addWidget(preview);
+    row->addWidget(apply);
+    row->addStretch();
+    row->addWidget(close);
+    layout->addLayout(row);
+    QJsonObject selection;
+    bool running = false;
+    const QString script =
+        QFileInfo(knowledgeWorkerPath()).dir().filePath(QStringLiteral("knowledge_library.py"));
+    auto run = [&](bool execute) {
+        if (running)
+            return;
+        QStringList args{QStringLiteral("--db"),
+                         database,
+                         QStringLiteral("prune-absent"),
+                         QStringLiteral("--older-than-days"),
+                         QString::number(days->value()),
+                         QStringLiteral("--reserve-gib"),
+                         QString::number(m_storageReserveGiB),
+                         QStringLiteral("--max-gib"),
+                         QString::number(m_libraryQuotaGiB)};
+        if (execute)
+            args << QStringLiteral("--apply") << QStringLiteral("--cutoff")
+                 << selection.value("cutoff").toString() << QStringLiteral("--selection-token")
+                 << selection.value("selection_token").toString();
+        running = true;
+        preview->setEnabled(false);
+        apply->setEnabled(false);
+        days->setEnabled(false);
+        auto *job = JsonWorkerRequest::run(
+            &dialog, script, args,
+            [&, execute](const JsonWorkerRequest::Result &result) {
+                running = false;
+                preview->setEnabled(true);
+                days->setEnabled(true);
+                selection = {};
+                if (!result.success) {
+                    details->setPlainText(result.error);
+                    return;
+                }
+                if (execute) {
+                    details->setPlainText(
+                        QStringLiteral("已清理 %1 份库内正文；%2 "
+                                       "份原文件重新出现，已保留并恢复可用状态。原文件均未删除。空"
+                                       "闲页可复用，库文件不一定立即缩小。")
+                            .arg(result.data.value("deleted").toInt())
+                            .arg(result.data.value("restored").toInt()));
+                } else {
+                    selection = result.data;
+                    QStringList lines{
+                        QStringLiteral("符合保留时间的记录：%1 份；截止 %2。以下为最多 10 个示例：")
+                            .arg(selection.value("count").toInt())
+                            .arg(selection.value("cutoff").toString())};
+                    for (const auto &value : selection.value("examples").toArray())
+                        lines << value.toObject().value("name").toString();
+                    details->setPlainText(lines.join('\n'));
+                    apply->setEnabled(selection.value("count").toInt() > 0);
+                }
+            },
+            300000);
+        connect(job, &JsonWorkerRequest::progress, &dialog, [details](const QJsonObject &data) {
+            details->setPlainText(
+                QStringLiteral("正在清理：%1 / %2；关闭此窗可取消未完成任务；未提交的清理会回滚。")
+                    .arg(data.value("processed").toInt())
+                    .arg(data.value("total").toInt()));
+        });
+    };
+    connect(preview, &QPushButton::clicked, &dialog, [&] { run(false); });
+    connect(days, QOverload<int>::of(&QSpinBox::valueChanged), &dialog, [&] {
+        selection = {};
+        apply->setEnabled(false);
+    });
+    connect(apply, &QPushButton::clicked, &dialog, [&] {
+        if (QMessageBox::question(
+                &dialog, QStringLiteral("确认清理库内正文"),
+                QStringLiteral("将清理预览范围内的 %1 "
+                               "份记录。库内正文和索引将删除，原文件不会删除；没有备份时需重新建库"
+                               "才能恢复。离线资料盘也可能被标为缺失。确定继续？")
+                    .arg(selection.value("count").toInt()),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes)
+            run(true);
+    });
+    connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+    m_dialogJobBusy = true;
+    emit busyChanged();
+    dialog.exec();
+    m_dialogJobBusy = false;
+    emit busyChanged();
+}
+
 void SmartSpaceWidget::startKnowledgeSearch(const QString &query)
 {
     if (query != m_executedQuery || m_searchUsesRegex)
@@ -852,7 +999,7 @@ void SmartSpaceWidget::startKnowledgeSearch(const QString &query)
         QStringLiteral("--budget-ms"),
         QStringLiteral("2000")};
     process->start(QStandardPaths::findExecutable(QStringLiteral("python3")), args);
-    QTimer::singleShot(3000, process, [process] {
+    QTimer::singleShot(5000, process, [process] {
         if (process->state() != QProcess::NotRunning)
             process->kill();
     });
@@ -1030,6 +1177,11 @@ void SmartSpaceWidget::handleKnowledgeOutput()
                 m_indexProgress->setValue(qBound(0, int(completed * 100.0 / total), 100));
                 m_indexProgress->show();
             }
+        }
+        if (task == QLatin1String("build") &&
+            object.value("phase").toString() == QLatin1String("migrate")) {
+            m_statusLabel->setText(object.value("message").toString());
+            continue;
         }
         if (task == QLatin1String("build") && !object.value(QStringLiteral("done")).toBool()) {
             m_statusLabel->setText(

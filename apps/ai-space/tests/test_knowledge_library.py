@@ -253,7 +253,7 @@ class KnowledgeLibraryTest(unittest.TestCase):
                 result = run_ocr([sys.executable, str(script)], stdout=out, timeout=5)
             self.assertEqual(result.returncode, 0)
             value = json.loads(output.read_text())
-            self.assertEqual(value["cores"], 1)
+            self.assertEqual(value["cores"], len(os.sched_getaffinity(0)))
             self.assertEqual(value["memory"], 512 * 1024 ** 2)
             self.assertEqual(value["threads"], "1")
             burner = self.root / "burn.py"

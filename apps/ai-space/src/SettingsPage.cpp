@@ -595,6 +595,12 @@ QWidget *SmartSpaceWidget::createSettingsPage(QWidget *parent)
     chunkRow->addWidget(knowledgeOverlap);
     chunkRow->addStretch(1);
     knowledgeLayout->addLayout(chunkRow);
+    auto *rechunkHint = new QLabel(QStringLiteral("修改片段长度或上下文重叠后，下次建库会重新处理全"
+                                                  "部文档；PDF 可能重新渲染，OCR 页缓存可复用。"),
+                                   knowledgeTab);
+    rechunkHint->setWordWrap(true);
+    rechunkHint->setProperty("settingsHint", true);
+    knowledgeLayout->addWidget(rechunkHint);
     connect(knowledgeChunkSize, QOverload<int>::of(&QSpinBox::valueChanged), knowledgeOverlap,
             [knowledgeOverlap](int value) { knowledgeOverlap->setMaximum(value / 3); });
     auto *buildKnowledgeNow =

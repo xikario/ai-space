@@ -1165,9 +1165,9 @@ void SmartSpaceWidget::buildUi()
                                    QStringLiteral("第2步：按已有清单提取正文，不运行OCR"));
     m_ocrIndexButton = createTask("ocr", QStringLiteral("③ OCR补全"),
                                   QStringLiteral("第3步：按已扫描清单识别图片与扫描PDF"));
-    m_refreshButton = createTask(
-        "refresh", QStringLiteral("增量"),
-        QStringLiteral("在当前知识库基础上重新扫描；未变化的正文会复用，更新或删除有变化的记录"));
+    m_refreshButton = createTask("refresh", QStringLiteral("增量"),
+                                 QStringLiteral("在当前知识库基础上重新扫描；未变化的正文会复用，更"
+                                                "新有变化的记录；已不在清单中的正文默认保留"));
     m_pauseIndexButton =
         createTask("pause", QStringLiteral("暂停"), QStringLiteral("安全暂停当前索引"));
     m_pauseIndexButton->setEnabled(false);

@@ -50,7 +50,7 @@ def parser_version(path):
 
         return EXTRACTOR_VERSION + "+" + PARSER_VERSION
     if Path(path).suffix.lower() in TEXT_SUFFIXES:
-        return EXTRACTOR_VERSION + "+safe-text-2"
+        return EXTRACTOR_VERSION + "+safe-text-3"
     return EXTRACTOR_VERSION
 
 

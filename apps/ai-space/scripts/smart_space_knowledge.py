@@ -167,6 +167,36 @@ def migrate_legacy_schema(db):
         db.execute("PRAGMA foreign_keys=ON")
 
 
+def upgrade_plan(db):
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "documents" not in tables or not db.execute("SELECT 1 FROM documents LIMIT 1").fetchone():
+        return []
+    meta = dict(db.execute("SELECT key,value FROM meta")) if "meta" in tables else {}
+    stages = []
+    if meta.get("schema_version") == "1":
+        stages.append("旧正文结构")
+    if "document_names_fts" not in tables:
+        stages.append("文件名索引")
+    if meta.get("fts_rowid_layout") != "chunk-id-v1":
+        stages.append("正文索引布局")
+    if "extraction_summary" not in tables:
+        stages.append("OCR 统计索引")
+    if "document_availability" not in tables or "absent_since" not in {
+        row[1] for row in db.execute("PRAGMA table_info(document_availability)")
+    }:
+        stages.append("来源保留时间")
+    return stages
+
+
+def upgrade_space_error(path, stages):
+    size_gib = os.path.getsize(path) / 1024 ** 3
+    return RuntimeError(
+        "旧库索引升级未完成（%s）：容量上限或磁盘空间不足。当前库约 %.2f GiB，"
+        "升级可能需要额外接近当前库大小的临时空间（粗略上界，不是精确需求）；"
+        "请检查可用空间和单库上限，或在充足空间的副本上升级。已有正文未被清理，未自动放宽配额。" % ("、".join(stages), size_gib)
+    )
+
+
 def open_db(path, read_only=False):
     path = os.path.abspath(os.path.expanduser(path))
     if read_only:
@@ -188,7 +218,17 @@ def open_db(path, read_only=False):
             raise
     os.makedirs(os.path.dirname(path), exist_ok=True)
     db = sqlite3.connect(path, timeout=30)
+    migration = []
     try:
+        migration = upgrade_plan(db)
+        if migration:
+            emit(
+                task="build",
+                phase="migrate",
+                steps=migration,
+                databaseBytes=os.path.getsize(path),
+                message="正在一次性升级旧库索引（%s）；可能需要额外临时空间，仍遵守容量和磁盘保留上限" % "、".join(migration),
+            )
         if db.execute("PRAGMA application_id").fetchone()[0] == 0x41494B42:
             db.close()
             raise ValueError("Imported AIKB libraries are read-only; build into a personal library")
@@ -276,9 +316,23 @@ def open_db(path, read_only=False):
             "INSERT OR IGNORE INTO meta(key,value) VALUES('library_id',?)",
             (str(uuid.uuid5(uuid.NAMESPACE_URL, str(Path(path).resolve()))),),
         )
-        from failure_store import prepare
+        columns = {row[1] for row in db.execute("PRAGMA table_info(document_availability)")}
+        if "absent_since" not in columns:
+            db.execute(
+                "ALTER TABLE document_availability ADD COLUMN absent_since TEXT NOT NULL DEFAULT ''"
+            )
+        # An old unseen record has no trustworthy age. Start its retention clock
+        # at the explicit upgrade, never infer that it was deleted months ago.
+        db.execute(
+            "UPDATE document_availability SET absent_since=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE status='unseen' AND absent_since=''"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS document_absent_idx ON document_availability(status,absent_since,document_id)"
+        )
+        from failure_store import prepare, prepare_metrics
 
         prepare(db)
+        prepare_metrics(db)
         has_names = db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='document_names_fts'"
         ).fetchone()
@@ -295,8 +349,10 @@ def open_db(path, read_only=False):
         db.commit()
         secure_db_files(path)
         return db
-    except BaseException:
+    except BaseException as error:
         db.close()
+        if migration and isinstance(error, sqlite3.Error) and "full" in str(error).lower():
+            raise upgrade_space_error(path, migration) from error
         raise
 
 
@@ -324,6 +380,16 @@ def align_fts_rowids(db):
         db.execute("DROP TABLE chunks_fts")
         db.execute("ALTER TABLE chunks_fts_aligned RENAME TO chunks_fts")
     db.execute("INSERT OR REPLACE INTO meta VALUES('fts_rowid_layout','chunk-id-v1')")
+
+
+def mark_availability(db, doc_id, present):
+    db.execute(
+        """INSERT INTO document_availability(document_id,status,absent_since)
+        VALUES(?,?,CASE WHEN ?='unseen' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE '' END)
+        ON CONFLICT(document_id) DO UPDATE SET status=excluded.status,
+        absent_since=CASE WHEN excluded.status='present' THEN '' WHEN document_availability.status='unseen' AND document_availability.absent_since!='' THEN document_availability.absent_since ELSE excluded.absent_since END""",
+        (doc_id, "present" if present else "unseen", "present" if present else "unseen"),
+    )
 
 
 def delete_fts_document(db, doc_id):
@@ -642,6 +708,14 @@ def build_locked(args):
     total = 0
     generated_at = ""
     last_progress = 0.0
+    last_commit = time.monotonic()
+
+    def checkpoint(force=False):
+        nonlocal last_commit
+        now = time.monotonic()
+        if force or now - last_commit >= 5:
+            db.commit()
+            last_commit = now
 
     def report_extraction(count):
         unit = "blocks"
@@ -665,6 +739,7 @@ def build_locked(args):
 
     try:
         for total, item in index_items(args.index_stream, args.index_json):
+            checkpoint()  # Only between documents, never inside an extraction savepoint.
             processed += 1
             generated_at = item.get("generated_at") or generated_at
             if item["is_dir"] or not item["path"]:
@@ -927,15 +1002,17 @@ def build_locked(args):
                         time.strftime("%Y-%m-%dT%H:%M:%S"),
                     ),
                 )
-                from failure_store import store_category
+                from failure_store import store_category, store_metrics
 
                 store_category(db, doc_id, result.status, result.issues)
+                store_metrics(db, doc_id, result.status, result.issues, result.kind)
                 documents += 1
                 chunks_count += count
                 if retry_ids or (args.ocr and "." + suffix in (IMAGE_SUFFIXES | {".pdf"})):
-                    db.commit()  # Every completed OCR document survives pause.
+                    checkpoint(force=True)  # Completed OCR/retry documents survive pause.
+            checkpoint()
             if processed % 50 == 0:
-                db.commit()
+                checkpoint(force=True)
                 emit(
                     task="build",
                     phase="build",
@@ -967,10 +1044,7 @@ def build_locked(args):
                 document_path = db.execute(
                     "SELECT path FROM documents WHERE id=?", (doc_id,)
                 ).fetchone()[0]
-                db.execute(
-                    "INSERT OR REPLACE INTO document_availability VALUES(?,?)",
-                    (doc_id, "present" if Path(document_path).is_file() else "unseen"),
-                )
+                mark_availability(db, doc_id, Path(document_path).is_file())
         elif args.include_root:
             selected_roots = [os.path.abspath(root) for root in args.include_root]
             for doc_id, document_path in db.execute("SELECT id,path FROM documents"):
@@ -983,13 +1057,14 @@ def build_locked(args):
                         db.execute("SELECT 1 FROM seen_paths WHERE path=?", (absolute,)).fetchone()
                         is not None
                     )
-                    db.execute(
-                        "INSERT OR REPLACE INTO document_availability(document_id,status) VALUES(?,?)",
-                        (doc_id, "present" if present else "unseen"),
-                    )
+                    mark_availability(db, doc_id, present)
         else:
             db.execute(
-                "INSERT OR REPLACE INTO document_availability(document_id,status) SELECT id,CASE WHEN path IN (SELECT path FROM seen_paths) THEN 'present' ELSE 'unseen' END FROM documents"
+                """INSERT INTO document_availability(document_id,status,absent_since)
+                SELECT id,CASE WHEN path IN (SELECT path FROM seen_paths) THEN 'present' ELSE 'unseen' END,
+                CASE WHEN path IN (SELECT path FROM seen_paths) THEN '' ELSE strftime('%Y-%m-%dT%H:%M:%SZ','now') END FROM documents WHERE 1
+                ON CONFLICT(document_id) DO UPDATE SET status=excluded.status,
+                absent_since=CASE WHEN excluded.status='present' THEN '' WHEN document_availability.status='unseen' AND document_availability.absent_since!='' THEN document_availability.absent_since ELSE excluded.absent_since END"""
             )
         removed_ids = (
             stale_ids if getattr(args, "prune_unseen", False) and not args.ocr_only else []

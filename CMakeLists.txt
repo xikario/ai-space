@@ -54,7 +54,7 @@ add_dependencies(ai-space ai-space-runtime)
 install(TARGETS ai-space RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS ${APP}/scripts/smart_space_indexer.py ${APP}/scripts/smart_space_knowledge.py
     ${APP}/scripts/smart_space_extract.py ${APP}/scripts/legacy_ppt.py ${APP}/scripts/knowledge_library.py
-    ${APP}/scripts/knowledge_jobs.py ${APP}/scripts/job_recovery.py ${APP}/scripts/ocr_budget.py ${APP}/scripts/provider_policy.py ${APP}/scripts/text_safety.py ${APP}/scripts/xml_safety.py ${APP}/scripts/ocr_environment.py ${APP}/scripts/gvariant_json.py ${APP}/scripts/failure_store.py ${APP}/scripts/ocr_cache.py ${APP}/scripts/rtf_text.py ${APP}/scripts/snapshot_io.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
+    ${APP}/scripts/knowledge_jobs.py ${APP}/scripts/knowledge_maintenance.py ${APP}/scripts/job_recovery.py ${APP}/scripts/ocr_budget.py ${APP}/scripts/provider_policy.py ${APP}/scripts/text_safety.py ${APP}/scripts/xml_safety.py ${APP}/scripts/ocr_environment.py ${APP}/scripts/gvariant_json.py ${APP}/scripts/failure_store.py ${APP}/scripts/ocr_cache.py ${APP}/scripts/rtf_text.py ${APP}/scripts/snapshot_io.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
 install(DIRECTORY ${APP}/scripts/_vendor/ DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space/_vendor
     PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
 install(FILES ${APP}/packaging/ai-space.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
@@ -79,6 +79,8 @@ if(BUILD_TESTING)
     target_compile_definitions(ai-space-test-driver PRIVATE AI_SPACE_TEST_CONTROL)
     target_link_libraries(ai-space-test-driver PRIVATE ai-space-core)
     add_dependencies(ai-space-test-driver ai-space-runtime)
+    add_test(NAME ai-space-review-followup COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_followup_review.py)
+    set_tests_properties(ai-space-review-followup PROPERTIES TIMEOUT 120)
     add_test(NAME ai-space-portable-skill COMMAND ${Python3_EXECUTABLE} ${APP}/tests/portable_skill_test.py ${CMAKE_BINARY_DIR}/share/ai-space/skills/ai-space-index-query)
     set_tests_properties(ai-space-portable-skill PROPERTIES TIMEOUT 25)
     add_test(NAME ai-space-review-regressions COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${APP}/tests -p test_review_regressions.py -v)

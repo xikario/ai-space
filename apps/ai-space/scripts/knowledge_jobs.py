@@ -5,10 +5,12 @@ import contextlib
 import fcntl
 import json
 import resource
-from ocr_budget import available_memory, ResourcePressureError
+import sqlite3
+from ocr_budget import check_memory_pressure
 import os
 from pathlib import Path
 import signal
+import selectors
 import subprocess
 import sys
 import time
@@ -22,7 +24,53 @@ from knowledge_library import (
     stats,
     document_ids,
     ignored_ids,
+    StorageLimitError,
 )
+
+
+def forward_stage_output(process, check_resources):
+    """Forward bounded JSONL and retain the worker's actionable final error."""
+    buffer = b""
+    last_error = {}
+    next_check = 0.0
+
+    def line(value):
+        nonlocal last_error
+        if not value.strip():
+            return
+        payload = json.loads(value)
+        if not isinstance(payload, dict):
+            raise ValueError("后台阶段返回的数据格式无效")
+        emit(**payload)
+        if payload.get("done") and payload.get("error"):
+            last_error = payload
+
+    with selectors.DefaultSelector() as selector, process.stdout:
+        os.set_blocking(process.stdout.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            if process.poll() is None and time.monotonic() >= next_check:
+                check_resources()
+                next_check = time.monotonic() + 1
+            events = selector.select(1.0 if process.poll() is None else 0)
+            for key, unused in events:
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                buffer += chunk
+                while b"\n" in buffer:
+                    value, buffer = buffer.split(b"\n", 1)
+                    if len(value) > 1024 * 1024:
+                        raise ValueError("后台阶段单条响应过大")
+                    line(value)
+                if len(buffer) > 1024 * 1024:
+                    raise ValueError("后台阶段单条响应过大")
+            if process.poll() is not None and not events:
+                break
+        if buffer:
+            line(buffer)
+    return last_error
 
 
 def main():
@@ -132,7 +180,7 @@ def main():
         scripts = Path(__file__).resolve().parent
 
         def paused(signum, frame):
-            raise InterruptedError("Job paused; completed documents are retained")
+            raise InterruptedError("任务已暂停；已提交进度保留，当前未提交批次可能需要重新处理")
 
         signal.signal(signal.SIGTERM, paused)
         try:
@@ -155,9 +203,7 @@ def main():
             emit(task="pipeline", stage=stage, phase="start")
             storage_plan(directory, 0, args.reserve_gib, args.max_gib)
             memory = max(512, min(8192, args.ocr_memory)) * 1024 ** 2
-            free = available_memory()
-            if free is not None and free < memory + 256 * 1024 ** 2:
-                raise ResourcePressureError("系统可用内存不足，建库已暂停并保留进度；可降低工作进程预算或稍后继续")
+            check_memory_pressure("建库启动")
 
             def worker_limits():
                 resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
@@ -165,19 +211,38 @@ def main():
             process = subprocess.Popen(
                 [sys.executable, *map(str, command)],
                 env=env,
+                stdout=subprocess.PIPE,
                 preexec_fn=worker_limits,
                 pass_fds=(lock.fileno(), temp_session.fileno()),
             )
-            while process.poll() is None:
-                guard_storage(database, args.reserve_gib, args.max_gib)
-                # Catalogs, temporary OCR outputs and SQLite WAL share this
-                # volume; reserve is checked even during a long document.
-                storage_plan(directory, 0, args.reserve_gib, args.max_gib)
-                time.sleep(1.0)
+
+            def check_resources():
+                check_memory_pressure("建库运行", starting=False)
+                try:
+                    guard_storage(database, args.reserve_gib, args.max_gib)
+                    storage_plan(directory, 0, args.reserve_gib, args.max_gib)
+                except StorageLimitError as error:
+                    if stage != "manifest" and database.exists():
+                        from smart_space_knowledge import upgrade_plan, upgrade_space_error
+
+                        with contextlib.closing(
+                            sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.25)
+                        ) as source:
+                            source.execute("PRAGMA query_only=ON")
+                            plan = upgrade_plan(source)
+                        if plan:
+                            raise upgrade_space_error(database, plan) from error
+                    raise
+
+            error = forward_stage_output(process, check_resources)
             if process.returncode:
-                raise RuntimeError(
-                    "%s failed (exit %s); completed data retained" % (stage, process.returncode)
+                message = error.get("error") or "%s failed (exit %s); 已提交进度保留" % (
+                    stage,
+                    process.returncode,
                 )
+                if error.get("paused"):
+                    raise InterruptedError(message)
+                raise RuntimeError(message)
             process = None
             state = dict(stage=stage, completed_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
             pending = catalog / "job.json.partial"

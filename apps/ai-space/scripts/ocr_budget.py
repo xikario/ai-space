@@ -22,13 +22,22 @@ def available_memory():
     return None
 
 
+def check_memory_pressure(stage, starting=True):
+    """Physical reserve is independent of the worker's virtual address cap."""
+    required_mib = 384 if starting else 256
+    free = available_memory()
+    if free is not None and free < required_mib * 1024 ** 2:
+        raise ResourcePressureError(
+            "系统可用内存约 %d MiB，%s需要至少保留 %d MiB；任务已暂停，已提交进度保留，请释放内存后继续"
+            % (max(0, free // (1024 ** 2)), stage, required_mib)
+        )
+
+
 def run_ocr(arguments, stdout=None, timeout=120):
     percent = max(5, min(100, int(os.environ.get("AI_SPACE_OCR_CPU_PERCENT", "25"))))
     wall_timeout = max(1, float(timeout)) * 100.0 / percent + 5
     memory = max(512, min(8192, int(os.environ.get("AI_SPACE_OCR_MEMORY_MB", "1024")))) * 1024 ** 2
-    free = available_memory()
-    if free is not None and free < memory + 256 * 1024 ** 2:
-        raise ResourcePressureError("系统可用内存不足，OCR 已暂停；已完成内容保留，请关闭高占用程序后继续")
+    check_memory_pressure("OCR 启动")
     environment = dict(
         os.environ, OMP_THREAD_LIMIT="1", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1"
     )
@@ -38,10 +47,8 @@ def run_ocr(arguments, stdout=None, timeout=120):
             os.nice(19)
         except OSError:
             pass
-        if hasattr(os, "sched_getaffinity"):
-            cores = os.sched_getaffinity(0)
-            if cores:
-                os.sched_setaffinity(0, {min(cores)})
+        # Preserve the user's allowed CPU set. Single-threaded OCR and the
+        # duty-cycle limit control resource use without pinning to a LITTLE core.
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
         resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 ** 2, 256 * 1024 ** 2))
         resource.setrlimit(resource.RLIMIT_CPU, (max(1, int(timeout)), max(2, int(timeout) + 1)))
@@ -63,9 +70,7 @@ def run_ocr(arguments, stdout=None, timeout=120):
             while child.poll() is None:
                 if time.monotonic() - started > wall_timeout:
                     raise subprocess.TimeoutExpired(arguments, wall_timeout)
-                free = available_memory()
-                if free is not None and free < 256 * 1024 ** 2:
-                    raise ResourcePressureError("系统内存压力升高，OCR 已暂停并保留已完成内容")
+                check_memory_pressure("OCR 运行", starting=False)
                 directory = os.environ.get("AI_SPACE_STORAGE_DIRECTORY")
                 if directory:
                     from knowledge_library import storage_plan

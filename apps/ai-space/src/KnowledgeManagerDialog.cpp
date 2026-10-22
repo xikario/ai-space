@@ -410,7 +410,10 @@ QString KnowledgeManagerDialog::directory() const
 QStringList KnowledgeManagerDialog::roots() const
 {
     QStringList result;
-    for (auto path : m_roots->toPlainText().split('\n', QString::SkipEmptyParts)) {
+    const auto rootLines = m_roots->toPlainText().split('\n');
+    for (auto path : rootLines) {
+        if (path.trimmed().isEmpty())
+            continue;
         path = QDir::cleanPath(path.trimmed());
         if (!result.contains(path))
             result.append(path);
