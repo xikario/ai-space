@@ -1,13 +1,40 @@
 name: Build and test
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   linux:
-    runs-on: ubuntu-22.04
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-current
+            runner: ubuntu-22.04
+            image: ubuntu:22.04
+          - name: arm64-current
+            runner: ubuntu-24.04-arm
+            image: ubuntu:24.04
+          - name: qt-5.12-python-3.8-compatibility
+            runner: ubuntu-22.04
+            image: ubuntu:20.04
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      AI_SPACE_REQUIRE_CHINESE_OCR: '1'
     steps:
+      - name: Install build and test dependencies
+        run: |
+          apt-get update
+          apt-get install -y git cmake build-essential qtbase5-dev zlib1g-dev xvfb dbus-x11 x11-utils xdotool fonts-noto-cjk fonts-dejavu-core poppler-utils tesseract-ocr tesseract-ocr-chi-sim python3 python3-pil python3-reportlab
+          tesseract --list-langs | grep -x chi_sim
+          python3 --version
+          qmake -query QT_VERSION
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y qtbase5-dev libgl1-mesa-dev zlib1g-dev xvfb dbus-x11 x11-utils xdotool fonts-noto-cjk poppler-utils tesseract-ocr python3-pil python3-reportlab
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build -j2
       - run: ctest --output-on-failure -j2
         working-directory: build
-      - run: cmake --install build --prefix "$PWD/staging"
+      - run: cmake --install build --prefix "$PWD/build/staging"

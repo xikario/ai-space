@@ -610,6 +610,29 @@ class SmartSpaceIndexerTests(unittest.TestCase):
         self.assertEqual(item["source"], "provider:dbus-test")
 
     @unittest.skipUnless(shutil.which("tesseract"), "tesseract unavailable")
+    def test_real_chinese_image_ocr(self):
+        languages = subprocess.check_output(['tesseract', '--list-langs'], text=True)
+        if 'chi_sim' not in languages.splitlines():
+            if os.environ.get('AI_SPACE_REQUIRE_CHINESE_OCR') == '1':
+                self.fail('CI requires the chi_sim Tesseract language pack')
+            self.skipTest('Chinese OCR language pack unavailable')
+        from PIL import Image, ImageDraw, ImageFont
+        font_path = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
+        if not Path(font_path).is_file():
+            if os.environ.get('AI_SPACE_REQUIRE_CHINESE_OCR') == '1':
+                self.fail('CI requires a CJK font for real Chinese OCR')
+            self.skipTest('CJK font unavailable')
+        image = Image.new('RGB', (1100, 240), 'white')
+        draw = ImageDraw.Draw(image)
+        draw.text((40, 60), '中文资料检索测试', fill='black',
+                  font=ImageFont.truetype(font_path, 80))
+        image.save(self.root / '中文扫描.png')
+        payload, _ = self.run_indexer('--ocr-images')
+        item = next(item for item in payload['items'] if item['name'] == '中文扫描.png')
+        self.assertIn('中文资料', item['content'].replace(' ', ''))
+        self.assertEqual(item['extractor'], 'tesseract')
+
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract unavailable")
     def test_real_image_ocr(self):
         from PIL import Image, ImageDraw, ImageFont
         image = Image.new("RGB", (1500, 300), "white")

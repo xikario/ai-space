@@ -9,3 +9,7 @@ system Python and shell Python have the same XLS/OLE support:
 Original licenses and distribution metadata are retained in the package and
 `.dist-info` directories. No office process or network service is started by
 these dependencies. Newer Office containers use the Python standard library.
+
+The vendored copy is trimmed to runtime modules, author notices, licenses and
+package metadata. Upstream HTML documentation, Python 2 compatibility code,
+CLI helpers and wheel installation bookkeeping are not shipped.
