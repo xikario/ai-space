@@ -455,6 +455,139 @@ class ReviewRegressions(unittest.TestCase):
             child.stdout.close()
             alive.close()
 
+    def test_recovery_skips_non_regular_session_markers(self):
+        import job_recovery
+
+        directory = self.root / "temporary"
+        folder = directory / "job-invalid-marker"
+        folder.mkdir(parents=True)
+        os.mkfifo(folder / ".ai-space-session")
+        started = time.monotonic()
+        self.assertEqual(job_recovery.clean_interrupted(directory), (0, 1))
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(folder.exists())
+
+    def test_sigkill_pipeline_recovers_scratch_without_deleting_committed_body(self):
+        import ctypes
+        import signal
+        import job_recovery
+
+        libc = ctypes.CDLL(None)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        source = self.root / "source"
+        source.mkdir()
+        document = source / "retained.txt"
+        document.write_text("已提交正文必须保留", encoding="utf-8")
+        managed = self.root / "managed"
+        command = [
+            sys.executable,
+            str(SCRIPTS / "knowledge_jobs.py"),
+            "--directory",
+            str(managed),
+            "--roots-json",
+            json.dumps([str(source)]),
+            "--reserve-gib",
+            ".01",
+        ]
+        subprocess.run(command, capture_output=True, text=True, timeout=15, check=True)
+        database = managed / "smart-space-knowledge.sqlite"
+        with contextlib.closing(lib.open_readonly(database)) as db:
+            committed = db.execute("SELECT content FROM chunks").fetchall()
+        (source / "blocked.pdf").write_bytes(b"%PDF-1.4 simulated slow document")
+        tools = self.root / "fake-tools"
+        tools.mkdir()
+        ready = self.root / "parser-ready"
+        parser = tools / "pdftotext"
+        parser.write_text(
+            "#!"
+            + sys.executable
+            + "\nimport os,time\nfrom pathlib import Path\np=Path(os.environ['AI_SPACE_TEST_RECOVERY_READY']);q=p.with_suffix('.tmp');q.write_text(str(os.getpid()));os.replace(q,p)\ntime.sleep(60)\n"
+        )
+        parser.chmod(0o755)
+        environment = dict(
+            os.environ,
+            PATH=str(tools) + os.pathsep + os.environ["PATH"],
+            AI_SPACE_TEST_RECOVERY_READY=str(ready),
+        )
+        process = subprocess.Popen(
+            command,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        children = []
+        try:
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline and process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(
+                ready.exists(), "real text worker must reach the controlled slow parser"
+            )
+            parser_pid = int(ready.read_text())
+            status = Path("/proc/%d/stat" % parser_pid).read_text().rsplit(") ", 1)[1].split()
+            worker_pid = int(status[1])
+            children = [worker_pid, parser_pid]
+            self.assertEqual(os.getpgid(worker_pid), process.pid)
+            sessions = list((managed / "temporary").glob("job-*"))
+            self.assertEqual(len(sessions), 1)
+            self.assertTrue(
+                (sessions[0] / ".ai-space-session").read_text().startswith(job_recovery.MAGIC)
+            )
+            process.kill()
+            process.wait(timeout=3)
+            blocked = subprocess.run(
+                command + ["--manifest-only"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=environment,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("另一个建库任务", json.loads(blocked.stdout.splitlines()[-1])["error"])
+            self.assertEqual(job_recovery.clean_interrupted(managed / "temporary"), (0, 0))
+            os.killpg(process.pid, signal.SIGKILL)
+            for pid in children:
+                os.waitpid(pid, 0)
+            children = []
+            process.communicate(timeout=3)
+            before = database.read_bytes()
+            unrelated = managed / "temporary/job-unmarked"
+            unrelated.mkdir()
+            (unrelated / "keep.txt").write_text("keep")
+            recovered = subprocess.run(
+                command + ["--manifest-only"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=environment,
+                check=True,
+            )
+            events = [
+                json.loads(line) for line in recovered.stdout.splitlines() if line.startswith("{")
+            ]
+            self.assertTrue(any(row.get("recoveredTemporarySessions") == 1 for row in events))
+            self.assertFalse(sessions[0].exists())
+            self.assertTrue((unrelated / "keep.txt").exists())
+            self.assertEqual(before, database.read_bytes())
+            with contextlib.closing(lib.open_readonly(database)) as db:
+                self.assertEqual(db.execute("PRAGMA quick_check").fetchone()[0], "ok")
+                self.assertEqual(db.execute("SELECT content FROM chunks").fetchall(), committed)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            for pid in children:
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(pid, 0)
+            process.communicate(timeout=3)
+            libc.prctl(36, previous.value, 0, 0, 0)
+
     def test_filename_index_preserves_middle_substrings(self):
         path = self.root / "names.sqlite"
         db = worker.open_db(str(path))

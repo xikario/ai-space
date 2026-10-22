@@ -54,7 +54,7 @@ add_dependencies(ai-space ai-space-runtime)
 install(TARGETS ai-space RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS ${APP}/scripts/smart_space_indexer.py ${APP}/scripts/smart_space_knowledge.py
     ${APP}/scripts/smart_space_extract.py ${APP}/scripts/legacy_ppt.py ${APP}/scripts/knowledge_library.py
-    ${APP}/scripts/knowledge_jobs.py ${APP}/scripts/ocr_budget.py ${APP}/scripts/provider_policy.py ${APP}/scripts/text_safety.py ${APP}/scripts/xml_safety.py ${APP}/scripts/ocr_environment.py ${APP}/scripts/gvariant_json.py ${APP}/scripts/failure_store.py ${APP}/scripts/ocr_cache.py ${APP}/scripts/rtf_text.py ${APP}/scripts/snapshot_io.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
+    ${APP}/scripts/knowledge_jobs.py ${APP}/scripts/job_recovery.py ${APP}/scripts/ocr_budget.py ${APP}/scripts/provider_policy.py ${APP}/scripts/text_safety.py ${APP}/scripts/xml_safety.py ${APP}/scripts/ocr_environment.py ${APP}/scripts/gvariant_json.py ${APP}/scripts/failure_store.py ${APP}/scripts/ocr_cache.py ${APP}/scripts/rtf_text.py ${APP}/scripts/snapshot_io.py DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space)
 install(DIRECTORY ${APP}/scripts/_vendor/ DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ai-space/_vendor
     PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
 install(FILES ${APP}/packaging/ai-space.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)

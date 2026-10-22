@@ -12,7 +12,6 @@ import signal
 import subprocess
 import sys
 import time
-import tempfile
 from knowledge_library import (
     storage_plan,
     guard_storage,
@@ -108,7 +107,18 @@ def main():
                 )
         index = catalog / "index.json"
         index_stream = Path(str(index) + ".ui.bin.gz")
-        temp_session = tempfile.TemporaryDirectory(prefix="job-", dir=str(temporary))
+        from job_recovery import JobSession
+
+        temp_session = JobSession(temporary)
+        if temp_session.recovered or temp_session.retained:
+            emit(
+                task="pipeline",
+                phase="recovery",
+                recoveredTemporarySessions=temp_session.recovered,
+                retainedTemporarySessions=temp_session.retained,
+                message="已检查上次未正常结束任务的临时目录；正式知识库未被清理",
+            )
+
         env = dict(
             os.environ,
             TMPDIR=temp_session.name,
@@ -141,6 +151,7 @@ def main():
 
         def run(stage, command):
             nonlocal process
+            temp_session.stage(stage)
             emit(task="pipeline", stage=stage, phase="start")
             storage_plan(directory, 0, args.reserve_gib, args.max_gib)
             memory = max(512, min(8192, args.ocr_memory)) * 1024 ** 2
@@ -152,7 +163,10 @@ def main():
                 resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
 
             process = subprocess.Popen(
-                [sys.executable, *map(str, command)], env=env, preexec_fn=worker_limits
+                [sys.executable, *map(str, command)],
+                env=env,
+                preexec_fn=worker_limits,
+                pass_fds=(lock.fileno(), temp_session.fileno()),
             )
             while process.poll() is None:
                 guard_storage(database, args.reserve_gib, args.max_gib)
